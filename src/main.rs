@@ -2,6 +2,7 @@ mod board;
 mod fen;
 mod perft;
 mod search;
+mod tt;
 mod types;
 mod uci;
 mod uci_io;

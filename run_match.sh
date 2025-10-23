@@ -11,9 +11,9 @@
 set -euo pipefail
 
 # --- Defaults (match your requested command) ---
-ENGINE_BIN="./target/release/chess"
+ENGINE_BIN="./versions/chess_v2"
 ENGINE_ARG="uci"
-ENGINE_NAME="Rusty"
+ENGINE_NAME="version 2"
 
 SF_BIN="/usr/bin/stockfish"
 SF_NAME="Stockfish"

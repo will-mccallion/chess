@@ -543,7 +543,7 @@ impl Board {
         // remove moving piece (zob & bb)
         self.zobrist ^= self.zob.piece_key(moving, from);
         self.piece_on[from] = Piece::Empty;
-        self.piece_bb[moving.index()] ^= (1u64 << from);
+        self.piece_bb[moving.index()] ^= 1u64 << from;
         match moving.color() {
             Some(Color::White) => self.w_pieces ^= 1u64 << from,
             Some(Color::Black) => self.b_pieces ^= 1u64 << from,
