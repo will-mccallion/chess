@@ -1,4 +1,3 @@
-// src/tt.rs
 use crate::types::{Move, ZKey};
 
 /// What kind of bound the stored score represents.

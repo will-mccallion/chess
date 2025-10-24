@@ -1,3 +1,4 @@
+use crate::attacks;
 use crate::fen;
 use crate::types::*;
 use crate::zobrist::Zobrist;
@@ -22,6 +23,7 @@ pub struct Board {
     pub halfmove_clock: i32,
     pub fullmove_number: i32,
 
+    pub history: Vec<ZKey>, // To track positions for repetition checks
     pub zobrist: ZKey,
     pub zob: Zobrist,
 }
@@ -39,6 +41,7 @@ impl Board {
             en_passant_sq: NO_SQ,
             halfmove_clock: 0,
             fullmove_number: 1,
+            history: Vec::with_capacity(128),
             zobrist: 0,
             zob: Zobrist::new(),
         }
@@ -86,6 +89,32 @@ impl Board {
             h ^= self.zob.side;
         }
         self.zobrist = h;
+    }
+
+    /// Counts previous occurrences of the current position.
+    pub fn count_repetitions(&self) -> usize {
+        let current_key = self.zobrist;
+        let mut count = 0;
+        // Iterate backwards through history, stopping at the last irreversible move.
+        for &key in self
+            .history
+            .iter()
+            .rev()
+            .take(self.halfmove_clock as usize)
+            .skip(1)
+        // Skip the current position itself
+        {
+            if key == current_key {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Checks if the current position is a draw due to threefold repetition.
+    /// This is true if the position has occurred at least twice before.
+    pub fn is_draw_by_repetition(&self) -> bool {
+        self.count_repetitions() >= 2
     }
 
     #[inline]
@@ -145,53 +174,24 @@ impl Board {
             }
         }
 
-        // sliders
-        let rook = if by == Color::White {
-            Piece::WR
+        // sliders via precomputed tables
+        let occ = self.all_pieces;
+        let rook_like_attackers = if by == Color::White {
+            self.piece_bb[Piece::WR.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
-            Piece::BR
+            self.piece_bb[Piece::BR.index()] | self.piece_bb[Piece::BQ.index()]
         };
-        let bishop = if by == Color::White {
-            Piece::WB
+        let bishop_like_attackers = if by == Color::White {
+            self.piece_bb[Piece::WB.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
-            Piece::BB
-        };
-        let queen = if by == Color::White {
-            Piece::WQ
-        } else {
-            Piece::BQ
+            self.piece_bb[Piece::BB.index()] | self.piece_bb[Piece::BQ.index()]
         };
 
-        for (d_idx, d) in DIRS.iter().enumerate() {
-            let mut to = square;
-            loop {
-                let prev = to;
-                to += d;
-                if !in_board(to) {
-                    break;
-                }
-
-                // prevent horizontal wrapping
-                if (d_idx == 0 || d_idx == 1) && rank_of(to) != rank_of(prev) {
-                    break;
-                }
-                // diagonals must change file by exactly 1 each step
-                if d_idx >= 4 && (file_of(to) - file_of(prev)).abs() != 1 {
-                    break;
-                }
-
-                let p = self.piece_on[to as usize];
-                if p.is_empty() {
-                    continue;
-                }
-                if d_idx < 4 && (p == rook || p == queen) {
-                    return true;
-                }
-                if d_idx >= 4 && (p == bishop || p == queen) {
-                    return true;
-                }
-                break;
-            }
+        if (attacks::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
+            return true;
+        }
+        if (attacks::get_bishop_attacks(square as usize, occ) & bishop_like_attackers) != 0 {
+            return true;
         }
 
         false
@@ -474,54 +474,76 @@ impl Board {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
         let enemy = if white { self.b_pieces } else { self.w_pieces };
+        let occ = self.all_pieces;
 
-        // bishop, rook, queen
-        let gens = [
-            if white { Piece::WB } else { Piece::BB }, // diagonals 4..8
-            if white { Piece::WR } else { Piece::BR }, // orth 0..4
-            if white { Piece::WQ } else { Piece::BQ }, // both 0..8
-        ];
-        let ranges = [(4, 8), (0, 4), (0, 8)];
+        // Bishops
+        let b_piece = if white { Piece::WB } else { Piece::BB };
+        let mut bb = self.piece_bb[b_piece.index()];
+        while bb != 0 {
+            let from = bb.trailing_zeros() as usize;
+            bb &= bb - 1;
+            let mut att = attacks::get_bishop_attacks(from, occ) & !friendly;
+            while att != 0 {
+                let to = att.trailing_zeros() as usize;
+                att &= att - 1;
+                let capture = (enemy & (1u64 << to)) != 0;
+                out.push(Move {
+                    from: from as u8,
+                    to: to as u8,
+                    capture,
+                    en_passant: false,
+                    double_push: false,
+                    castle: false,
+                    promotion: None,
+                });
+            }
+        }
 
-        for (idx, p) in gens.iter().enumerate() {
-            let (s, e) = ranges[idx];
-            let mut bb = self.piece_bb[p.index()];
-            while bb != 0 {
-                let from = bb.trailing_zeros() as i32;
-                bb &= bb - 1;
-                for d_idx in s..e {
-                    let d = DIRS[d_idx];
-                    let mut to = from;
-                    loop {
-                        let prev = to;
-                        to += d;
-                        if !in_board(to) {
-                            break;
-                        }
-                        if (d_idx == 0 || d_idx == 1) && rank_of(to) != rank_of(prev) {
-                            break;
-                        }
-                        if d_idx >= 4 && (file_of(to) - file_of(prev)).abs() != 1 {
-                            break;
-                        }
-                        if (friendly & (1u64 << to)) != 0 {
-                            break;
-                        }
-                        if (enemy & (1u64 << to)) != 0 {
-                            out.push(Move {
-                                from: from as u8,
-                                to: to as u8,
-                                capture: true,
-                                en_passant: false,
-                                double_push: false,
-                                castle: false,
-                                promotion: None,
-                            });
-                            break;
-                        }
-                        out.push(Move::quiet(from as u8, to as u8));
-                    }
-                }
+        // Rooks
+        let r_piece = if white { Piece::WR } else { Piece::BR };
+        let mut rb = self.piece_bb[r_piece.index()];
+        while rb != 0 {
+            let from = rb.trailing_zeros() as usize;
+            rb &= rb - 1;
+            let mut att = attacks::get_rook_attacks(from, occ) & !friendly;
+            while att != 0 {
+                let to = att.trailing_zeros() as usize;
+                att &= att - 1;
+                let capture = (enemy & (1u64 << to)) != 0;
+                out.push(Move {
+                    from: from as u8,
+                    to: to as u8,
+                    capture,
+                    en_passant: false,
+                    double_push: false,
+                    castle: false,
+                    promotion: None,
+                });
+            }
+        }
+
+        // Queens
+        let q_piece = if white { Piece::WQ } else { Piece::BQ };
+        let mut qb = self.piece_bb[q_piece.index()];
+        while qb != 0 {
+            let from = qb.trailing_zeros() as usize;
+            qb &= qb - 1;
+            let mut att = (attacks::get_rook_attacks(from, occ)
+                | attacks::get_bishop_attacks(from, occ))
+                & !friendly;
+            while att != 0 {
+                let to = att.trailing_zeros() as usize;
+                att &= att - 1;
+                let capture = (enemy & (1u64 << to)) != 0;
+                out.push(Move {
+                    from: from as u8,
+                    to: to as u8,
+                    capture,
+                    en_passant: false,
+                    double_push: false,
+                    castle: false,
+                    promotion: None,
+                });
             }
         }
     }
@@ -530,7 +552,7 @@ impl Board {
         // Snapshot (simple & correct; you can optimize later)
         let snap = Box::new(self.clone());
 
-        // --- Clear EP zobrist if present
+        // Clear EP zobrist if present
         if self.en_passant_sq != NO_SQ {
             self.zobrist ^= self.zob.ep_file[(self.en_passant_sq % 8) as usize];
         }
@@ -689,6 +711,9 @@ impl Board {
         }
         self.turn = self.turn.other();
 
+        // Add the new position's hash to the history for repetition checks
+        self.history.push(self.zobrist);
+
         Undo { snap }
     }
 
@@ -699,5 +724,29 @@ impl Board {
 
     pub fn to_fen(&self) -> String {
         fen::to_fen(self)
+    }
+    pub fn make_null_move(&mut self) -> Undo {
+        let snap = Box::new(self.clone());
+
+        // Clear EP square if it exists, updating zobrist
+        if self.en_passant_sq != -1 {
+            self.zobrist ^= self.zob.ep_file[(self.en_passant_sq % 8) as usize];
+            self.en_passant_sq = -1;
+        }
+
+        // Flip side to move and update zobrist
+        self.turn = self.turn.other();
+        self.zobrist ^= self.zob.side;
+
+        // A null move is reversible, so the halfmove clock for repetition counting increments.
+        self.halfmove_clock += 1;
+        // Add new hash to history
+        self.history.push(self.zobrist);
+
+        Undo { snap }
+    }
+
+    pub fn unmake_null_move(&mut self, u: Undo) {
+        let _ = std::mem::replace(self, *u.snap);
     }
 }

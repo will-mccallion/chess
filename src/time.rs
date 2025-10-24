@@ -1,4 +1,3 @@
-// src/time.rs
 #[derive(Copy, Clone, Default)]
 pub struct TimeControl {
     pub wtime: i64,

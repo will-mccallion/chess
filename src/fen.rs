@@ -79,6 +79,7 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
 
     b.rebuild_derived();
     b.recompute_zobrist(); // consistent after rebuild
+    b.history.push(b.zobrist); // Initialize history with the starting position hash
     Ok(b)
 }
 

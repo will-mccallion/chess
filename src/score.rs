@@ -1,4 +1,3 @@
-// src/score.rs
 #![allow(clippy::manual_range_contains)]
 
 pub const MATE: i32 = 30_000; // "matish" sentinel, far from i32::MAX

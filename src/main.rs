@@ -1,18 +1,10 @@
-mod board;
-mod fen;
-mod perft;
-mod search;
-mod tt;
-mod types;
-mod uci;
-mod uci_io;
-mod zobrist;
-
-use crate::board::Board;
-use crate::perft::{divide, perft};
-use crate::search::best_move_depth;
-use crate::types::START_FEN;
-use crate::uci_io::{format_uci, parse_uci_move};
+use chess::attacks;
+use chess::board::Board;
+use chess::perft::{divide, perft};
+use chess::search::best_move_depth;
+use chess::types::START_FEN;
+use chess::uci;
+use chess::uci_io::{format_uci, parse_uci_move};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -50,6 +42,7 @@ enum Cmd {
 
 fn main() {
     let cli = Cli::parse();
+    attacks::init();
     match cli.cmd.unwrap_or(Cmd::Uci) {
         Cmd::Perft {
             depth,
@@ -120,7 +113,7 @@ fn play_cli(b: &mut Board, depth: usize) {
 
 // very small ASCII rendering for CLI play
 fn print_board_ascii(b: &Board) {
-    use crate::types::Piece;
+    use chess::types::Piece;
 
     const BLUE: &str = "\x1b[34m";
     const RESET: &str = "\x1b[0m";
