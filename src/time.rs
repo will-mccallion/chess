@@ -15,15 +15,17 @@ impl TimeControl {
         } else {
             (self.btime, self.binc)
         };
+
         let mtg = if self.movestogo > 0 {
             self.movestogo as i64
         } else {
             30
-        }; // default bucket
+        };
+
         let overhead = self.move_overhead_ms.max(5);
-        // basic split: 1/(mtg+7) of remaining plus some inc
         let soft = (time / (mtg + 7)).max(10) + (inc * 3 / 4);
         let hard = (soft * 3 / 2).min(time - overhead).max(soft + overhead);
+
         (soft.max(5), hard.max(soft + 5))
     }
 }

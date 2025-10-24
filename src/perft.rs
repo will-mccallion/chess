@@ -16,7 +16,7 @@ fn perft_inner(b: &mut Board, depth: usize) -> u64 {
     for m in moves {
         let u = b.make_move(m);
         nodes += perft_inner(b, depth - 1);
-        b.unmake_move(u);
+        b.unmake_move(m, u);
     }
     nodes
 }
@@ -33,12 +33,12 @@ pub fn divide(b: &mut Board, depth: usize) {
     for m in moves {
         let u = b.make_move(m);
         let n = perft_inner(b, depth - 1);
-        b.unmake_move(u);
+        b.unmake_move(m, u);
         total += n;
 
-        let from_file = (m.from % 8) + b'a' as u8;
+        let from_file = (m.from % 8) + b'a';
         let from_rank = (m.from / 8) + b'1';
-        let to_file = (m.to % 8) + b'a' as u8;
+        let to_file = (m.to % 8) + b'a';
         let to_rank = (m.to / 8) + b'1';
         println!(
             "{}{}{}{}: {}",

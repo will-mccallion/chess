@@ -1,30 +1,23 @@
 use crate::types::{Move, ZKey};
+use std::sync::{Arc, Mutex};
 
-/// What kind of bound the stored score represents.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Bound {
-    /// Exact score (PV node).
     Exact,
-    /// Lower bound (fail-high).
     Lower,
-    /// Upper bound (fail-low).
     Upper,
 }
 
-/// One transposition-table entry. Keep this tight and POD-like.
 #[derive(Copy, Clone, Debug)]
 pub struct TTEntry {
-    pub key: ZKey,               // full 64-bit Zobrist to avoid false positives
-    pub depth: i16,              // search depth this entry was computed at
-    pub score: i32,              // score in centipawns from the side to move's POV
-    pub bound: Bound,            // Exact / Lower / Upper
-    pub best_move: Option<Move>, // move that caused beta-cutoff or PV move
-    pub age: u8,                 // simple generation counter for replacement
+    pub key: ZKey,
+    pub depth: i16,
+    pub score: i32,
+    pub bound: Bound,
+    pub best_move: Option<Move>,
+    pub age: u8,
 }
 
-/// A very simple, fixed-size transposition table:
-/// - power-of-two number of slots
-/// - 1 entry per bucket (always replace if deeper or entry is stale)
 pub struct TransTable {
     slots: Vec<Option<TTEntry>>,
     mask: usize,
@@ -32,15 +25,11 @@ pub struct TransTable {
 }
 
 impl TransTable {
-    /// Create a TT with an approximate memory budget in megabytes.
-    /// We pack entries in ~32 bytes, so this gives a rough sizing.
-    pub fn with_mb(mb: usize) -> Self {
-        // Guard against tiny/huge values; aim for a power of two slot count.
+    fn with_mb(mb: usize) -> Self {
         let bytes = mb.saturating_mul(1024 * 1024).max(32);
         let mut slots = (bytes / 32).max(1);
         slots = slots.next_power_of_two();
-        let mask = (slots - 1) as usize;
-
+        let mask = slots - 1;
         Self {
             slots: vec![None; slots],
             mask,
@@ -48,19 +37,12 @@ impl TransTable {
         }
     }
 
-    /// Optional alias.
-    pub fn new(size_mb: usize) -> Self {
-        Self::with_mb(size_mb)
-    }
-
-    /// Bump the generation; useful between searches to prefer fresh entries.
     #[inline]
-    pub fn tick_age(&mut self) {
+    fn tick_age(&mut self) {
         self.age = self.age.wrapping_add(1);
     }
 
-    /// Clear all entries and advance age (so stale entries lose on replacement).
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         for s in &mut self.slots {
             *s = None;
         }
@@ -69,13 +51,11 @@ impl TransTable {
 
     #[inline]
     fn idx(&self, key: ZKey) -> usize {
-        // Use low bits; Zobrist is uniform enough for this simple mask.
         (key as usize) & self.mask
     }
 
-    /// Probe the TT for an entry with this exact key.
     #[inline]
-    pub fn probe(&self, key: ZKey) -> Option<TTEntry> {
+    fn probe(&self, key: ZKey) -> Option<TTEntry> {
         let i = self.idx(key);
         match self.slots[i] {
             Some(e) if e.key == key => Some(e),
@@ -83,15 +63,7 @@ impl TransTable {
         }
     }
 
-    /// Store/replace an entry using a simple "deeper or newer" policy.
-    pub fn store(
-        &mut self,
-        key: ZKey,
-        depth: i16,
-        score: i32,
-        bound: Bound,
-        best_move: Option<Move>,
-    ) {
+    fn store(&mut self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
         let i = self.idx(key);
         let new = TTEntry {
             key,
@@ -101,20 +73,117 @@ impl TransTable {
             best_move,
             age: self.age,
         };
-
         match self.slots[i] {
-            None => self.slots[i] = Some(new),
+            None => {
+                self.slots[i] = Some(new);
+            }
             Some(old) => {
-                // Prefer deeper results, or overwrite stale generations.
-                if depth > old.depth || old.age != self.age {
+                if self.age != old.age || depth >= old.depth {
                     self.slots[i] = Some(new);
                 }
             }
         }
     }
 
-    pub fn hashfull_permill(&self) -> u32 {
+    #[inline]
+    fn stats(&self) -> (usize, usize) {
         let filled = self.slots.iter().filter(|e| e.is_some()).count();
-        ((filled * 1000) / self.slots.len()) as u32
+        (filled, self.slots.len())
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedTransTable {
+    shards: Vec<Arc<Mutex<TransTable>>>,
+    shard_mask: usize,
+}
+
+impl SharedTransTable {
+    pub fn new(size_mb: usize) -> Self {
+        let shard_count = Self::pick_shard_count();
+        let (per_shard, remainder) = if shard_count == 0 {
+            (size_mb, 0)
+        } else {
+            (size_mb / shard_count, size_mb % shard_count)
+        };
+
+        let mut shards = Vec::with_capacity(shard_count.max(1));
+        let count = shard_count.max(1);
+        for i in 0..count {
+            let mb = per_shard + if i < remainder { 1 } else { 0 };
+            let alloc_mb = mb.max(1);
+            shards.push(Arc::new(Mutex::new(TransTable::with_mb(alloc_mb))));
+        }
+
+        let shard_mask = count.saturating_sub(1);
+
+        Self { shards, shard_mask }
+    }
+
+    #[inline]
+    fn pick_shard_count() -> usize {
+        let cpus = num_cpus::get().max(1);
+        let target = (cpus / 8) + 1;
+        target.next_power_of_two().min(8)
+    }
+
+    #[inline]
+    fn shard_index(&self, key: ZKey) -> usize {
+        let mut x = key as u64;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51afd7ed558ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+        x ^= x >> 33;
+        (x as usize) & self.shard_mask
+    }
+
+    #[inline]
+    fn shard_for(&self, key: ZKey) -> &Arc<Mutex<TransTable>> {
+        let idx = if self.shards.len().is_power_of_two() {
+            self.shard_index(key)
+        } else {
+            (key as usize) % self.shards.len()
+        };
+        &self.shards[idx]
+    }
+
+    pub fn probe(&self, key: ZKey) -> Option<TTEntry> {
+        let guard = self.shard_for(key).lock().unwrap();
+        guard.probe(key)
+    }
+
+    pub fn store(&self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
+        let mut guard = self.shard_for(key).lock().unwrap();
+        guard.store(key, depth, score, bound, best_move);
+    }
+
+    pub fn clear(&self) {
+        for shard in &self.shards {
+            shard.lock().unwrap().clear();
+        }
+    }
+
+    pub fn tick_age(&self) {
+        for shard in &self.shards {
+            shard.lock().unwrap().tick_age();
+        }
+    }
+
+    pub fn hashfull_permill(&self) -> u32 {
+        let mut filled_total = 0usize;
+        let mut slots_total = 0usize;
+        for shard in &self.shards {
+            let guard = shard.lock().unwrap();
+            let (filled, total) = guard.stats();
+            filled_total += filled;
+            slots_total += total;
+        }
+
+        if slots_total == 0 {
+            0
+        } else {
+            ((filled_total * 1000) / slots_total) as u32
+        }
     }
 }

@@ -12,7 +12,6 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
     let halfmove = parts.next().unwrap_or("0");
     let fullmove = parts.next().unwrap_or("1");
 
-    // Placement
     let mut rank = 7;
     let mut file = 0;
     for ch in placement.chars() {
@@ -37,14 +36,12 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
         }
     }
 
-    // Side
     b.turn = match side {
         "w" => Color::White,
         "b" => Color::Black,
         _ => return Err("bad side".into()),
     };
 
-    // Castling
     b.castle = 0;
     if castle != "-" {
         for c in castle.chars() {
@@ -58,7 +55,6 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
         }
     }
 
-    // EP square
     if ep == "-" {
         b.en_passant_sq = NO_SQ;
     } else {
@@ -68,9 +64,11 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
         }
         let f = (bytes[0] as char).to_ascii_lowercase() as u8 - b'a';
         let r = (bytes[1] as char) as u8 - b'1';
+
         if f > 7 || r > 7 {
             return Err("bad ep coord".into());
         }
+
         b.en_passant_sq = (r as i32) * 8 + (f as i32);
     }
 
@@ -78,18 +76,22 @@ pub fn parse_fen(fen: &str) -> Result<Board, String> {
     b.fullmove_number = fullmove.parse().unwrap_or(1);
 
     b.rebuild_derived();
-    b.recompute_zobrist(); // consistent after rebuild
-    b.history.push(b.zobrist); // Initialize history with the starting position hash
+    b.recompute_zobrist();
+    b.history.push(b.zobrist);
+
     Ok(b)
 }
 
 pub fn to_fen(b: &Board) -> String {
     let mut s = String::new();
+
     for r in (0..8).rev() {
         let mut empty = 0;
+
         for f in 0..8 {
             let sq = (r * 8 + f) as usize;
             let p = b.piece_on[sq];
+
             if p.is_empty() {
                 empty += 1;
             } else {
@@ -100,13 +102,16 @@ pub fn to_fen(b: &Board) -> String {
                 s.push(format!("{p}").chars().next().unwrap());
             }
         }
+
         if empty > 0 {
             s.push(char::from(b'0' + empty as u8));
         }
+
         if r != 0 {
             s.push('/');
         }
     }
+
     s.push(' ');
     s.push(if b.turn == Color::White { 'w' } else { 'b' });
     s.push(' ');
@@ -117,12 +122,15 @@ pub fn to_fen(b: &Board) -> String {
         if b.castle & WK_CASTLE != 0 {
             s.push('K');
         }
+
         if b.castle & WQ_CASTLE != 0 {
             s.push('Q');
         }
+
         if b.castle & BK_CASTLE != 0 {
             s.push('k');
         }
+
         if b.castle & BQ_CASTLE != 0 {
             s.push('q');
         }
@@ -137,6 +145,7 @@ pub fn to_fen(b: &Board) -> String {
         s.push(f as char);
         s.push(r as char);
     }
+
     s.push(' ');
     s.push_str(&b.halfmove_clock.to_string());
     s.push(' ');

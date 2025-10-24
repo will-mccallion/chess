@@ -1,24 +1,15 @@
 use crate::board::Board;
 use phf::phf_map;
 
-/// A compile-time generated, read-only map for extremely fast opening book lookups.
-/// The key is the first four fields of the FEN string, representing a unique position.
-/// The value is the recommended move in UCI format.
-///
-/// This book now contains lines for both White and Black.
 static OPENING_BOOK: phf::Map<&'static str, &'static str> = phf_map! {
-    // WHITE'S MOVES
-
-    // STARTING POSITION
+    // Whites moves
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -" => "e2e4",
 
-    //  Responses to 1...e5 (Open Game)
-    "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6" => "g1f3", // 2. Nf3
-    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 1 3" => "f1b5", // 3. Bb5 (Ruy Lopez)
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6" => "g1f3", // Nf3
+    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 1 3" => "f1b5", // Bb5 (Ruy Lopez)
     "r1bqkbnr/1p1p1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4" => "b5a4", // Ruy Lopez: Morphy Defense
 
-    //  Responses to 1...c5 (Sicilian Defense)
-    "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6" => "g1f3", // 2. Nf3
+    "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6" => "g1f3", // Nf3
     "rnbqkbnr/pp2pppp/3p4/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3" => "d2d4", // Open Sicilian vs 2...d6
     "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 1 3" => "d2d4", // Open Sicilian vs 2...Nc6
     "rnbqkb1r/pp2pppp/3p1n2/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R w KQkq - 1 4" => "b1c3", // Open Sicilian, main line
@@ -31,7 +22,7 @@ static OPENING_BOOK: phf::Map<&'static str, &'static str> = phf_map! {
     "rnbqkbnr/pp2pppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2" => "d2d4",
     "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 2" => "d7e4",
 
-    //  1. d4 Openings
+    // d4 Openings
     "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1" => "g8f6", // Indian Defense
     "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2" => "c2c4", // Main line vs Indian
     "rnbqkb1r/pppp1ppp/4pn2/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3" => "b1c3", // vs Nimzo/Bogo
@@ -39,11 +30,11 @@ static OPENING_BOOK: phf::Map<&'static str, &'static str> = phf_map! {
     "rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3" => "b1c3", // QGD Exchange variation
 
 
-    //  BLACK'S MOVES
+    // Blacks moves
 
-    //  Defenses to 1. e4
+    //  Defenses to e4
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" => "c7c5", // Sicilian Defense
-    "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2" => "b8c6", // vs 2. Nf3
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2" => "b8c6", // vs Nf3
     "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 3" => "a7a6", // Ruy Lopez, Morphy Defense
     "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2" => "d7d6", // Sicilian, 2...d6
     "rnbqkb1r/pp2pppp/3p1n2/2p5/3PP3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 4" => "c5d4", // Sicilian, cxd4
@@ -53,7 +44,7 @@ static OPENING_BOOK: phf::Map<&'static str, &'static str> = phf_map! {
     "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" => "e7e5", // Open Game
     "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 2 3" => "g8f6", // Italian Game, Two Knights Defense
 
-    //  Defenses to 1. d4
+    //  Defenses to d4
     "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1" => "d7d5", // Queen's Pawn Game
     "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2" => "c7c6", // Slav Defense
     "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2" => "e7e6", // Nimzo/Bogo/QGD setup
@@ -70,8 +61,6 @@ fn fen_key(b: &Board) -> String {
     format!("{placement} {side} {castle} {ep}")
 }
 
-/// Looks up the current board position in the opening book.
-/// Returns a UCI move string if a match is found.
 pub fn get_book_move(b: &Board) -> Option<&'static str> {
     let key = fen_key(b);
     OPENING_BOOK.get(key.as_str()).copied()

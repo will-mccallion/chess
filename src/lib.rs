@@ -1,11 +1,13 @@
-pub mod attacks;
 pub mod board;
 pub mod eval;
 pub mod fen;
+pub mod magic_finder;
+pub mod magics;
 pub mod opening_book;
 pub mod perft;
 pub mod pst;
 pub mod search;
+pub mod see;
 pub mod time;
 pub mod tt;
 pub mod types;

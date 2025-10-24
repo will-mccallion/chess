@@ -1,9 +1,7 @@
 use crate::board::Board;
 use crate::types::{Move, PieceKind};
 
-/// Parse a UCI move like "e2e4" or "e7e8q" by matching it against generated legal moves.
-/// Returns `None` if the move is illegal or cannot be parsed.
-pub fn parse_uci_move(b: &Board, s: &str) -> Option<Move> {
+pub fn parse_uci_move(b: &mut Board, s: &str) -> Option<Move> {
     let bytes = s.as_bytes();
     if bytes.len() < 4 {
         return None;
@@ -17,10 +15,9 @@ pub fn parse_uci_move(b: &Board, s: &str) -> Option<Move> {
         return None;
     }
 
-    let from = (f_rank * 8 + f_file) as u8;
-    let to = (t_rank * 8 + t_file) as u8;
+    let from = f_rank * 8 + f_file;
+    let to = t_rank * 8 + t_file;
 
-    // promotion if present
     let promo = if bytes.len() >= 5 {
         match (bytes[4] as char).to_ascii_lowercase() {
             'q' => Some(PieceKind::Queen),
@@ -40,22 +37,22 @@ pub fn parse_uci_move(b: &Board, s: &str) -> Option<Move> {
         .find(|m| m.from == from && m.to == to && m.promotion == promo)
 }
 
-/// Format a move as UCI string like "e2e4" or "e7e8q".
 pub fn format_uci(m: Move) -> String {
     let ff = (m.from % 8) + b'a';
     let fr = (m.from / 8) + b'1';
     let tf = (m.to % 8) + b'a';
     let tr = (m.to / 8) + b'1';
     let mut s = format!("{}{}{}{}", ff as char, fr as char, tf as char, tr as char);
+
     if let Some(pk) = m.promotion {
         s.push(match pk {
             PieceKind::Queen => 'q',
             PieceKind::Rook => 'r',
             PieceKind::Bishop => 'b',
             PieceKind::Knight => 'n',
-            // Promotions are never King or Pawn; treat any other value as unreachable.
             _ => unreachable!("invalid promotion piece kind"),
         });
     }
+
     s
 }

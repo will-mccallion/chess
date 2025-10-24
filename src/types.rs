@@ -34,6 +34,19 @@ pub enum PieceKind {
     King,
 }
 
+impl PieceKind {
+    pub fn to_char_upper(&self) -> char {
+        match self {
+            PieceKind::Pawn => 'P',
+            PieceKind::Knight => 'N',
+            PieceKind::Bishop => 'B',
+            PieceKind::Rook => 'R',
+            PieceKind::Queen => 'Q',
+            PieceKind::King => 'K',
+        }
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Piece {
     Empty,
@@ -56,6 +69,7 @@ impl Piece {
     pub fn is_empty(self) -> bool {
         matches!(self, Piece::Empty)
     }
+
     #[inline]
     pub fn color(self) -> Option<Color> {
         match self {
@@ -68,6 +82,7 @@ impl Piece {
             _ => None,
         }
     }
+
     #[inline]
     pub fn kind(self) -> Option<PieceKind> {
         match self {
@@ -80,6 +95,25 @@ impl Piece {
             _ => None,
         }
     }
+
+    #[inline]
+    pub fn from_kind(kind: PieceKind, color: Color) -> Self {
+        match (kind, color) {
+            (PieceKind::Pawn, Color::White) => Piece::WP,
+            (PieceKind::Knight, Color::White) => Piece::WN,
+            (PieceKind::Bishop, Color::White) => Piece::WB,
+            (PieceKind::Rook, Color::White) => Piece::WR,
+            (PieceKind::Queen, Color::White) => Piece::WQ,
+            (PieceKind::King, Color::White) => Piece::WK,
+            (PieceKind::Pawn, Color::Black) => Piece::BP,
+            (PieceKind::Knight, Color::Black) => Piece::BN,
+            (PieceKind::Bishop, Color::Black) => Piece::BB,
+            (PieceKind::Rook, Color::Black) => Piece::BR,
+            (PieceKind::Queen, Color::Black) => Piece::BQ,
+            (PieceKind::King, Color::Black) => Piece::BK,
+        }
+    }
+
     #[inline]
     pub fn index(self) -> usize {
         self as usize
@@ -105,6 +139,7 @@ impl From<char> for Piece {
         }
     }
 }
+
 impl fmt::Display for Piece {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let c = match self {
@@ -134,7 +169,7 @@ pub struct Move {
     pub en_passant: bool,
     pub double_push: bool,
     pub castle: bool,
-    pub promotion: Option<PieceKind>, // Q/R/B/N
+    pub promotion: Option<PieceKind>,
 }
 
 impl Move {
@@ -152,19 +187,19 @@ impl Move {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Undo {
-    // For simplicity & correctness: full-state snapshot (fast enough for perft and debugging)
-    pub snap: Box<super::board::Board>,
+    pub captured_piece: Piece,
+    pub old_castle: u8,
+    pub old_en_passant_sq: i32,
+    pub old_halfmove_clock: i32,
 }
 
-// castling rights mask (KQkq) -> bit flags
 pub const WK_CASTLE: u8 = 1 << 0;
 pub const WQ_CASTLE: u8 = 1 << 1;
 pub const BK_CASTLE: u8 = 1 << 2;
 pub const BQ_CASTLE: u8 = 1 << 3;
 
-// small helpers
 #[inline]
 pub fn file_of(sq: i32) -> i32 {
     sq & 7
@@ -176,4 +211,21 @@ pub fn rank_of(sq: i32) -> i32 {
 #[inline]
 pub fn in_board(sq: i32) -> bool {
     (0..64).contains(&sq)
+}
+
+#[inline]
+pub fn sq_to_str(sq: usize) -> String {
+    let f = (sq % 8) as u8;
+    let r = (sq / 8) as u8;
+    format!("{}{}", (b'a' + f) as char, (b'1' + r) as char)
+}
+
+#[inline]
+pub fn file_char(sq: usize) -> char {
+    ((sq % 8) as u8 + b'a') as char
+}
+
+#[inline]
+pub fn rank_char(sq: usize) -> char {
+    ((sq / 8) as u8 + b'1') as char
 }
