@@ -2,7 +2,7 @@ use chess::board::Board;
 use chess::perft::{divide, perft};
 use chess::search::{best_move_timed, extract_pv};
 use chess::tt::SharedTransTable;
-use chess::types::{Move, START_FEN};
+use chess::types::{Color, Move, Piece, PieceKind, START_FEN};
 use chess::uci;
 use chess::uci_io::{format_uci, parse_uci_move};
 use clap::{Parser, Subcommand};
@@ -11,9 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+// Large stacks for deep recursion paths in helpers.
+const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
+
 #[derive(Parser)]
 #[command(
-    name = "chesser",
+    name = "chess",
     version,
     about = "Chess engine with perft/uci/play modes"
 )]
@@ -41,6 +44,18 @@ enum Cmd {
         #[arg(long)]
         threads: Option<usize>,
     },
+    SelfPlay {
+        #[arg(long, default_value_t = 10)]
+        rounds: usize,
+        #[arg(long, default_value_t = 5000)]
+        time: u64,
+        #[arg(long, default_value_t = 64)]
+        depth: usize,
+        #[arg(long)]
+        fen: Option<String>,
+        #[arg(long)]
+        threads: Option<usize>,
+    },
     Uci,
 }
 
@@ -54,7 +69,7 @@ fn main() {
         } => {
             let fen_str = fen.unwrap_or_else(|| START_FEN.to_string());
             let mut b = Board::from_fen(&fen_str).unwrap_or_else(|e| {
-                eprint!("FEN parse error: {e}");
+                eprintln!("FEN parse error: {e}");
                 std::process::exit(1);
             });
             if div {
@@ -73,13 +88,149 @@ fn main() {
             let threads_count = threads.unwrap_or_else(num_cpus::get).max(1);
             let fen_str = fen.unwrap_or_else(|| START_FEN.to_string());
             let mut b = Board::from_fen(&fen_str).unwrap_or_else(|e| {
-                eprint!("FEN parse error: {e}");
+                eprintln!("FEN parse error: {e}");
                 std::process::exit(1);
             });
             play_cli(&mut b, time, depth, threads_count);
         }
+        Cmd::SelfPlay {
+            rounds,
+            time,
+            depth,
+            fen,
+            threads,
+        } => {
+            let threads_count = threads.unwrap_or_else(num_cpus::get).max(1);
+            let fen_str = fen.unwrap_or_else(|| START_FEN.to_string());
+            self_play(&fen_str, rounds, time, depth, threads_count);
+        }
         Cmd::Uci => uci::run_uci(),
     }
+}
+
+fn self_play(fen_str: &str, rounds: usize, time_ms: u64, max_depth: usize, threads_count: usize) {
+    let mut white_wins = 0;
+    let mut black_wins = 0;
+    let mut draws = 0;
+
+    println!("Starting self-play session:");
+    println!("- Rounds: {}", rounds);
+    println!("- Time per move: {}ms", time_ms);
+    println!("- Max depth: {}", max_depth);
+    println!("- Threads: {}", threads_count);
+    println!("--------------------------------");
+
+    for i in 1..=rounds {
+        let mut b = Board::from_fen(fen_str).unwrap_or_else(|e| {
+            eprintln!("FEN parse error: {e}");
+            std::process::exit(1);
+        });
+
+        let tt_size_mb = 1024;
+        let mut tt = SharedTransTable::new(tt_size_mb);
+
+        println!("\nGame {}/{}", i, rounds);
+        println!("Starting FEN: {}", b.to_fen());
+
+        'gameloop: loop {
+            print!("\x1B[2J\x1B[H"); // Clear screen
+            println!("Game {}/{}", i, rounds);
+            println!("FEN: {}", b.to_fen());
+            print_board_ascii(&b);
+            println!("Turn: {:?}, Move: {}", b.turn, b.fullmove_number);
+
+            let mut legal_moves = Vec::new();
+            b.generate_legal_moves(&mut legal_moves);
+
+            if legal_moves.is_empty() {
+                let king_piece = Piece::from_kind(PieceKind::King, b.turn);
+                let king_sq_opt = b.piece_bb[king_piece.index()].trailing_zeros();
+                if king_sq_opt < 64 && b.is_square_attacked(king_sq_opt as i32, b.turn.other()) {
+                    println!("Result: Checkmate! {:?} wins.", b.turn.other());
+                    if b.turn.other() == Color::White {
+                        white_wins += 1;
+                    } else {
+                        black_wins += 1;
+                    }
+                } else {
+                    println!("Result: Stalemate!");
+                    draws += 1;
+                }
+                break 'gameloop;
+            }
+
+            if b.is_draw_by_repetition() || b.halfmove_clock >= 100 {
+                println!("Result: Draw!");
+                draws += 1;
+                break 'gameloop;
+            }
+
+            println!("Engine ({:?}) is thinking...", b.turn);
+
+            let stop_signal = Arc::new(AtomicBool::new(false));
+            let mut helpers = vec![];
+            let helper_depth = max_depth.min(64);
+
+            for i in 0..(threads_count - 1) {
+                let board_clone = b.clone();
+                let tt_clone = tt.clone();
+                let stop_clone = Arc::clone(&stop_signal);
+                let name = format!("self-play-helper-{}", i);
+                let _ = thread::Builder::new()
+                    .name(name)
+                    .stack_size(SEARCH_THREAD_STACK)
+                    .spawn(move || {
+                        let mut tt_local = tt_clone;
+                        best_move_timed(
+                            &board_clone,
+                            &mut tt_local,
+                            u64::MAX / 4,
+                            helper_depth,
+                            stop_clone,
+                            false,
+                        );
+                    })
+                    .map(|jh| helpers.push(jh));
+            }
+
+            let (engine_move_opt, _, _) = best_move_timed(
+                &b,
+                &mut tt,
+                time_ms,
+                max_depth,
+                Arc::clone(&stop_signal),
+                true,
+            );
+
+            stop_signal.store(true, Ordering::Relaxed);
+            for h in helpers {
+                let _ = h.join();
+            }
+
+            let engine_move = if let Some(m) = engine_move_opt {
+                m
+            } else {
+                println!("Engine has no moves. Game Over.");
+                draws += 1;
+                break 'gameloop;
+            };
+
+            println!(
+                "Engine plays: {} ({})",
+                b.to_san(engine_move, &legal_moves),
+                format_uci(engine_move)
+            );
+            let _u = b.make_move(engine_move);
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    println!("\nSelf-Play Session Complete");
+    println!("Final Score:");
+    println!("  White Wins: {}", white_wins);
+    println!("  Black Wins: {}", black_wins);
+    println!("  Draws: {}", draws);
+    println!("------------------------------------");
 }
 
 fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize) {
@@ -141,7 +292,7 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
 
             if user_move_opt.is_none() {
                 for &legal_move in &legal_moves {
-                    // --- THIS IS THE CORRECTED LINE ---
+                    // remove check/mate suffix to accept "Nf3" style inputs
                     let san_str = b.to_san(legal_move, &legal_moves).replace(['+', '#'], "");
                     if san_str == input_str {
                         user_move_opt = Some(legal_move);
@@ -180,22 +331,29 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
         let stop_signal = Arc::new(AtomicBool::new(false));
         let mut helpers = vec![];
 
-        for _ in 0..(threads_count - 1) {
+        // Conservative recursion cap for helpers to avoid stack blowups
+        let helper_depth = max_depth.min(64);
+
+        for i in 0..(threads_count - 1) {
             let board_clone = b.clone();
             let tt_clone = tt.clone();
             let stop_clone = Arc::clone(&stop_signal);
-            let handle = thread::spawn(move || {
-                let mut tt_local = tt_clone;
-                best_move_timed(
-                    &board_clone,
-                    &mut tt_local,
-                    u64::MAX / 4,
-                    max_depth,
-                    stop_clone,
-                    false,
-                );
-            });
-            helpers.push(handle);
+            let name = format!("helper-{}", i);
+            let _ = thread::Builder::new()
+                .name(name)
+                .stack_size(SEARCH_THREAD_STACK)
+                .spawn(move || {
+                    let mut tt_local = tt_clone;
+                    best_move_timed(
+                        &board_clone,
+                        &mut tt_local,
+                        u64::MAX / 4,
+                        helper_depth,
+                        stop_clone,
+                        false,
+                    );
+                })
+                .map(|jh| helpers.push(jh));
         }
 
         let (engine_move_opt, _, _) = best_move_timed(
@@ -237,18 +395,21 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
                 ponder_state.stop_signal.store(false, Ordering::Relaxed);
                 let stop_clone = Arc::clone(&ponder_state.stop_signal);
 
-                let handle = thread::spawn(move || {
-                    let mut tt_local = tt_clone;
-                    best_move_timed(
-                        &ponder_board,
-                        &mut tt_local,
-                        u64::MAX / 4,
-                        max_depth,
-                        stop_clone,
-                        false,
-                    );
-                });
-                ponder_state.handle = Some(handle);
+                let _ = thread::Builder::new()
+                    .name("ponder-helper-cli".to_string())
+                    .stack_size(SEARCH_THREAD_STACK)
+                    .spawn(move || {
+                        let mut tt_local = tt_clone;
+                        best_move_timed(
+                            &ponder_board,
+                            &mut tt_local,
+                            u64::MAX / 4,
+                            helper_depth,
+                            stop_clone,
+                            false,
+                        );
+                    })
+                    .map(|h| ponder_state.handle = Some(h));
             }
         }
     }

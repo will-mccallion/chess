@@ -1,37 +1,124 @@
 use crate::types::{Move, ZKey};
+use num_cpus;
 use std::sync::{Arc, Mutex};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum Bound {
-    Exact,
-    Lower,
-    Upper,
+    Exact = 0,
+    Lower = 1,
+    Upper = 2,
 }
 
-#[derive(Copy, Clone, Debug)]
+impl Bound {
+    #[inline(always)]
+    fn from_u8(val: u8) -> Self {
+        match val {
+            0 => Bound::Exact,
+            1 => Bound::Lower,
+            _ => Bound::Upper,
+        }
+    }
+}
+
+// A compact 16-Byte TTEntry.
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C)]
 pub struct TTEntry {
     pub key: ZKey,
-    pub depth: i16,
-    pub score: i32,
-    pub bound: Bound,
-    pub best_move: Option<Move>,
-    pub age: u8,
+    data: u64,
+}
+
+// Bitfield layout for the 64-bit data field:
+const SCORE_SHIFT: u64 = 0;
+const MOVE_SHIFT: u64 = 16;
+const DEPTH_SHIFT: u64 = 32;
+const AGE_SHIFT: u64 = 40;
+const BOUND_SHIFT: u64 = 48;
+
+const SCORE_MASK: u64 = 0xFFFF;
+const MOVE_MASK: u64 = 0xFFFF;
+const DEPTH_MASK: u64 = 0xFF;
+const AGE_MASK: u64 = 0xFF;
+const BOUND_MASK: u64 = 0x3;
+
+impl TTEntry {
+    fn new(
+        key: ZKey,
+        depth: i16,
+        score: i32,
+        bound: Bound,
+        best_move: Option<Move>,
+        age: u8,
+    ) -> Self {
+        let packed_score = (score as i16) as u16 as u64;
+        let packed_depth = (depth as u8) as u64;
+        let packed_move = best_move.map_or(0u16, |m| m.into()) as u64;
+        let packed_age = age as u64;
+        let packed_bound = bound as u8 as u64;
+
+        let data = (packed_score << SCORE_SHIFT)
+            | (packed_move << MOVE_SHIFT)
+            | (packed_depth << DEPTH_SHIFT)
+            | (packed_age << AGE_SHIFT)
+            | (packed_bound << BOUND_SHIFT);
+
+        Self { key, data }
+    }
+
+    #[inline(always)]
+    pub fn score(&self) -> i32 {
+        (((self.data >> SCORE_SHIFT) & SCORE_MASK) as i16) as i32
+    }
+    #[inline(always)]
+    pub fn depth(&self) -> i16 {
+        ((self.data >> DEPTH_SHIFT) & DEPTH_MASK) as u8 as i16
+    }
+    #[inline(always)]
+    pub fn best_move(&self) -> Option<Move> {
+        let packed_move = ((self.data >> MOVE_SHIFT) & MOVE_MASK) as u16;
+        if packed_move == 0 {
+            None
+        } else {
+            Some(packed_move.into())
+        }
+    }
+    #[inline(always)]
+    pub fn age(&self) -> u8 {
+        ((self.data >> AGE_SHIFT) & AGE_MASK) as u8
+    }
+    #[inline(always)]
+    pub fn bound(&self) -> Bound {
+        Bound::from_u8(((self.data >> BOUND_SHIFT) & BOUND_MASK) as u8)
+    }
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.key == 0
+    }
+}
+
+const CLUSTER_SIZE: usize = 4;
+
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(align(64))] // Align cluster to a 64-byte cache line
+pub struct TTCluster {
+    entries: [TTEntry; CLUSTER_SIZE],
 }
 
 pub struct TransTable {
-    slots: Vec<Option<TTEntry>>,
+    slots: Vec<TTCluster>,
     mask: usize,
     age: u8,
 }
 
 impl TransTable {
     fn with_mb(mb: usize) -> Self {
-        let bytes = mb.saturating_mul(1024 * 1024).max(32);
-        let mut slots = (bytes / 32).max(1);
-        slots = slots.next_power_of_two();
-        let mask = slots - 1;
+        let bytes = mb.saturating_mul(1024 * 1024).max(64);
+        let slot_size = std::mem::size_of::<TTCluster>();
+        let slots_count = (bytes / slot_size).max(1).next_power_of_two();
+        let mask = slots_count - 1;
         Self {
-            slots: vec![None; slots],
+            slots: vec![TTCluster::default(); slots_count],
             mask,
             age: 0,
         }
@@ -41,54 +128,68 @@ impl TransTable {
     fn tick_age(&mut self) {
         self.age = self.age.wrapping_add(1);
     }
-
-    fn clear(&mut self) {
-        for s in &mut self.slots {
-            *s = None;
-        }
-        self.tick_age();
-    }
-
     #[inline]
     fn idx(&self, key: ZKey) -> usize {
         (key as usize) & self.mask
     }
 
-    #[inline]
+    fn clear(&mut self) {
+        self.slots
+            .iter_mut()
+            .for_each(|s| *s = TTCluster::default());
+        self.tick_age();
+    }
+
     fn probe(&self, key: ZKey) -> Option<TTEntry> {
-        let i = self.idx(key);
-        match self.slots[i] {
-            Some(e) if e.key == key => Some(e),
-            _ => None,
+        let cluster = &self.slots[self.idx(key)];
+        for entry in &cluster.entries {
+            if entry.key == key {
+                return Some(*entry);
+            }
         }
+        None
     }
 
     fn store(&mut self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
         let i = self.idx(key);
-        let new = TTEntry {
-            key,
-            depth,
-            score,
-            bound,
-            best_move,
-            age: self.age,
-        };
-        match self.slots[i] {
-            None => {
-                self.slots[i] = Some(new);
-            }
-            Some(old) => {
-                if self.age != old.age || depth >= old.depth {
-                    self.slots[i] = Some(new);
+        let cluster = &mut self.slots[i];
+        let new_entry = TTEntry::new(key, depth, score, bound, best_move, self.age);
+
+        for entry in &mut cluster.entries {
+            if entry.key == key {
+                if self.age == entry.age() || new_entry.depth() >= entry.depth() {
+                    *entry = new_entry;
                 }
+                return;
             }
         }
+
+        for entry in &mut cluster.entries {
+            if entry.is_empty() {
+                *entry = new_entry;
+                return;
+            }
+        }
+
+        let mut replace_idx = 0;
+        let mut worst_quality = i32::MAX;
+        for (i, entry) in cluster.entries.iter().enumerate() {
+            let quality = (entry.depth() as i32) * 2 - (self.age.wrapping_sub(entry.age()) as i32);
+            if quality < worst_quality {
+                worst_quality = quality;
+                replace_idx = i;
+            }
+        }
+        cluster.entries[replace_idx] = new_entry;
     }
 
-    #[inline]
     fn stats(&self) -> (usize, usize) {
-        let filled = self.slots.iter().filter(|e| e.is_some()).count();
-        (filled, self.slots.len())
+        let filled = self
+            .slots
+            .iter()
+            .map(|c| c.entries.iter().filter(|e| !e.is_empty()).count())
+            .sum();
+        (filled, self.slots.len() * CLUSTER_SIZE)
     }
 }
 
@@ -106,30 +207,27 @@ impl SharedTransTable {
         } else {
             (size_mb / shard_count, size_mb % shard_count)
         };
-
         let mut shards = Vec::with_capacity(shard_count.max(1));
         let count = shard_count.max(1);
         for i in 0..count {
-            let mb = per_shard + if i < remainder { 1 } else { 0 };
-            let alloc_mb = mb.max(1);
-            shards.push(Arc::new(Mutex::new(TransTable::with_mb(alloc_mb))));
+            shards.push(Arc::new(Mutex::new(TransTable::with_mb(
+                (per_shard + if i < remainder { 1 } else { 0 }).max(1),
+            ))));
         }
-
-        let shard_mask = count.saturating_sub(1);
-
-        Self { shards, shard_mask }
+        Self {
+            shards,
+            shard_mask: count.saturating_sub(1),
+        }
     }
 
     #[inline]
     fn pick_shard_count() -> usize {
-        let cpus = num_cpus::get().max(1);
-        let target = (cpus / 8) + 1;
-        target.next_power_of_two().min(8)
+        (num_cpus::get().max(1) / 8 + 1).next_power_of_two().min(8)
     }
 
     #[inline]
     fn shard_index(&self, key: ZKey) -> usize {
-        let mut x = key as u64;
+        let mut x = key;
         x ^= x >> 33;
         x = x.wrapping_mul(0xff51afd7ed558ccd);
         x ^= x >> 33;
@@ -149,21 +247,19 @@ impl SharedTransTable {
     }
 
     pub fn probe(&self, key: ZKey) -> Option<TTEntry> {
-        let guard = self.shard_for(key).lock().unwrap();
-        guard.probe(key)
+        self.shard_for(key).lock().unwrap().probe(key)
     }
-
     pub fn store(&self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
-        let mut guard = self.shard_for(key).lock().unwrap();
-        guard.store(key, depth, score, bound, best_move);
+        self.shard_for(key)
+            .lock()
+            .unwrap()
+            .store(key, depth, score, bound, best_move);
     }
-
     pub fn clear(&self) {
         for shard in &self.shards {
             shard.lock().unwrap().clear();
         }
     }
-
     pub fn tick_age(&self) {
         for shard in &self.shards {
             shard.lock().unwrap().tick_age();
@@ -171,15 +267,11 @@ impl SharedTransTable {
     }
 
     pub fn hashfull_permill(&self) -> u32 {
-        let mut filled_total = 0usize;
-        let mut slots_total = 0usize;
-        for shard in &self.shards {
-            let guard = shard.lock().unwrap();
-            let (filled, total) = guard.stats();
-            filled_total += filled;
-            slots_total += total;
-        }
-
+        let (filled_total, slots_total) = self
+            .shards
+            .iter()
+            .map(|s| s.lock().unwrap().stats())
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
         if slots_total == 0 {
             0
         } else {

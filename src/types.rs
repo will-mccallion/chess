@@ -14,7 +14,7 @@ pub enum Color {
 }
 
 impl Color {
-    #[inline]
+    #[inline(always)] // Inlined for performance
     pub fn other(self) -> Color {
         if self == Color::White {
             Color::Black
@@ -65,12 +65,12 @@ pub enum Piece {
 }
 
 impl Piece {
-    #[inline]
+    #[inline(always)]
     pub fn is_empty(self) -> bool {
         matches!(self, Piece::Empty)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn color(self) -> Option<Color> {
         match self {
             Piece::WP | Piece::WN | Piece::WB | Piece::WR | Piece::WQ | Piece::WK => {
@@ -83,7 +83,7 @@ impl Piece {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn kind(self) -> Option<PieceKind> {
         match self {
             Piece::WP | Piece::BP => Some(PieceKind::Pawn),
@@ -96,7 +96,7 @@ impl Piece {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn from_kind(kind: PieceKind, color: Color) -> Self {
         match (kind, color) {
             (PieceKind::Pawn, Color::White) => Piece::WP,
@@ -114,7 +114,7 @@ impl Piece {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn index(self) -> usize {
         self as usize
     }
@@ -161,7 +161,20 @@ impl fmt::Display for Piece {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+// A move is packed into a u16 for performance.
+// [ 0- 5]: From Square (6 bits)
+// [ 6-11]: To Square   (6 bits)
+// [12-15]: Flags       (4 bits)
+// const MOVE_FLAG_QUIET: u16 = 0b0000;
+const MOVE_FLAG_DOUBLE_PUSH: u16 = 0b0001;
+const MOVE_FLAG_KING_CASTLE: u16 = 0b0010;
+const MOVE_FLAG_QUEEN_CASTLE: u16 = 0b0011;
+const MOVE_FLAG_CAPTURE: u16 = 0b0100;
+const MOVE_FLAG_EN_PASSANT: u16 = 0b0101;
+const MOVE_FLAG_PROMOTION: u16 = 0b1000;
+const MOVE_FLAG_PROMO_CAPTURE: u16 = 0b1100;
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct Move {
     pub from: u8,
     pub to: u8,
@@ -173,7 +186,7 @@ pub struct Move {
 }
 
 impl Move {
-    #[inline]
+    #[inline(always)]
     pub fn quiet(from: u8, to: u8) -> Self {
         Self {
             from,
@@ -184,6 +197,81 @@ impl Move {
             castle: false,
             promotion: None,
         }
+    }
+}
+
+impl From<Move> for u16 {
+    #[inline(always)]
+    fn from(m: Move) -> Self {
+        let from_u16 = m.from as u16;
+        let to_u16 = (m.to as u16) << 6;
+        let mut flags = 0u16;
+
+        if let Some(pk) = m.promotion {
+            flags = if m.capture {
+                MOVE_FLAG_PROMO_CAPTURE
+            } else {
+                MOVE_FLAG_PROMOTION
+            };
+            flags |= match pk {
+                PieceKind::Knight => 0,
+                PieceKind::Bishop => 1,
+                PieceKind::Rook => 2,
+                PieceKind::Queen => 3,
+                _ => 0,
+            };
+        } else if m.en_passant {
+            flags = MOVE_FLAG_EN_PASSANT;
+        } else if m.capture {
+            flags = MOVE_FLAG_CAPTURE;
+        } else if m.castle {
+            flags = if file_of(m.to as i32) > file_of(m.from as i32) {
+                MOVE_FLAG_KING_CASTLE
+            } else {
+                MOVE_FLAG_QUEEN_CASTLE
+            };
+        } else if m.double_push {
+            flags = MOVE_FLAG_DOUBLE_PUSH;
+        }
+
+        from_u16 | to_u16 | (flags << 12)
+    }
+}
+
+impl From<u16> for Move {
+    #[inline(always)]
+    fn from(m: u16) -> Self {
+        if m == 0 {
+            return Move::default();
+        } // Null move
+
+        let from = (m & 0x3F) as u8;
+        let to = ((m >> 6) & 0x3F) as u8;
+        let flags = m >> 12;
+
+        let mut mov = Move::quiet(from, to);
+
+        if flags >= MOVE_FLAG_PROMOTION {
+            mov.promotion = Some(match flags & 0b11 {
+                0 => PieceKind::Knight,
+                1 => PieceKind::Bishop,
+                2 => PieceKind::Rook,
+                _ => PieceKind::Queen,
+            });
+            if (flags & 0b0100) != 0 {
+                mov.capture = true;
+            }
+        } else if flags == MOVE_FLAG_EN_PASSANT {
+            mov.capture = true;
+            mov.en_passant = true;
+        } else if flags == MOVE_FLAG_CAPTURE {
+            mov.capture = true;
+        } else if flags == MOVE_FLAG_KING_CASTLE || flags == MOVE_FLAG_QUEEN_CASTLE {
+            mov.castle = true;
+        } else if flags == MOVE_FLAG_DOUBLE_PUSH {
+            mov.double_push = true;
+        }
+        mov
     }
 }
 
@@ -200,32 +288,29 @@ pub const WQ_CASTLE: u8 = 1 << 1;
 pub const BK_CASTLE: u8 = 1 << 2;
 pub const BQ_CASTLE: u8 = 1 << 3;
 
-#[inline]
+#[inline(always)]
 pub fn file_of(sq: i32) -> i32 {
     sq & 7
 }
-#[inline]
+#[inline(always)]
 pub fn rank_of(sq: i32) -> i32 {
     sq >> 3
 }
-#[inline]
+#[inline(always)]
 pub fn in_board(sq: i32) -> bool {
     (0..64).contains(&sq)
 }
-
-#[inline]
+#[inline(always)]
 pub fn sq_to_str(sq: usize) -> String {
     let f = (sq % 8) as u8;
     let r = (sq / 8) as u8;
     format!("{}{}", (b'a' + f) as char, (b'1' + r) as char)
 }
-
-#[inline]
+#[inline(always)]
 pub fn file_char(sq: usize) -> char {
     ((sq % 8) as u8 + b'a') as char
 }
-
-#[inline]
+#[inline(always)]
 pub fn rank_char(sq: usize) -> char {
     ((sq / 8) as u8 + b'1') as char
 }

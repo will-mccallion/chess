@@ -33,11 +33,11 @@ fn slider_mask(sq: usize, is_rook: bool) -> Bitboard {
 
     for (dr, df) in deltas {
         let (mut cr, mut cf) = (r as i32 + dr, f as i32 + df);
-        while cr >= 0 && cr < 8 && cf >= 0 && cf < 8 {
+        while (0..8).contains(&cr) && (0..8).contains(&cf) {
             let next_r = cr + dr;
             let next_f = cf + df;
 
-            if next_r >= 0 && next_r < 8 && next_f >= 0 && next_f < 8 {
+            if (0..8).contains(&next_r) && (0..8).contains(&next_f) {
                 result |= 1u64 << (cr * 8 + cf) as usize;
             }
 
@@ -102,7 +102,7 @@ fn find_magic_for_sq(sq: usize, is_rook: bool, rng: &mut Rng) -> (u64, Vec<u64>)
     let mut attempts = 0u64;
     loop {
         attempts += 1;
-        if attempts % 100_000 == 0 {
+        if attempts.is_multiple_of(100_000) {
             let piece = if is_rook { "Rook" } else { "Bishop" };
             let sq_name = format!(
                 "{}{}",
@@ -144,7 +144,7 @@ fn find_magic_for_sq(sq: usize, is_rook: bool, rng: &mut Rng) -> (u64, Vec<u64>)
             eprintln!(
                 "\rFound {} magic on {} after {} attempts!                ",
                 if is_rook { "Rook" } else { "Bishop" },
-                format!(
+                format_args!(
                     "{}{}",
                     (b'a' + (sq % 8) as u8) as char,
                     (b'1' + (sq / 8) as u8) as char

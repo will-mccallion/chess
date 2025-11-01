@@ -1,0 +1,8 @@
+[build]
+rustflags = [
+  "-C", "embed-bitcode=yes",
+  "-C", "target-cpu=native",
+  "-C", "codegen-units=1",
+  "-C", "opt-level=3"
+]
+

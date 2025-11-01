@@ -97,6 +97,7 @@ impl Board {
         let current_key = self.zobrist;
         let mut count = 0;
 
+        // Search history backwards from the second to last state
         for &key in self
             .history
             .iter()
@@ -122,18 +123,20 @@ impl Board {
         } else {
             Piece::BP
         };
-
         let dir = if by == Color::White { -8 } else { 8 };
         let f = file_of(square);
 
-        let s1 = square + dir - 1;
-        if f > 0 && in_board(s1) && self.piece_on[s1 as usize] == pawn {
-            return true;
+        if f > 0 {
+            let s1 = square + dir - 1;
+            if in_board(s1) && self.piece_on[s1 as usize] == pawn {
+                return true;
+            }
         }
-
-        let s2 = square + dir + 1;
-        if f < 7 && in_board(s2) && self.piece_on[s2 as usize] == pawn {
-            return true;
+        if f < 7 {
+            let s2 = square + dir + 1;
+            if in_board(s2) && self.piece_on[s2 as usize] == pawn {
+                return true;
+            }
         }
 
         let n = if by == Color::White {
@@ -141,13 +144,12 @@ impl Board {
         } else {
             Piece::BN
         };
-
         for d in KNIGHT_DELTAS {
             let to = square + d;
-            if !in_board(to) {
-                continue;
-            }
-            if (file_of(square) - file_of(to)).abs() <= 2 && self.piece_on[to as usize] == n {
+            if in_board(to)
+                && (file_of(square) - file_of(to)).abs() <= 2
+                && self.piece_on[to as usize] == n
+            {
                 return true;
             }
         }
@@ -157,34 +159,32 @@ impl Board {
         } else {
             Piece::BK
         };
-
         for d in KING_DELTAS {
             let to = square + d;
-            if !in_board(to) {
-                continue;
-            }
-            if (file_of(square) - file_of(to)).abs() <= 1 && self.piece_on[to as usize] == k {
+            if in_board(to)
+                && (file_of(square) - file_of(to)).abs() <= 1
+                && self.piece_on[to as usize] == k
+            {
                 return true;
             }
         }
 
         let occ = self.all_pieces;
+
         let rook_like_attackers = if by == Color::White {
             self.piece_bb[Piece::WR.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
             self.piece_bb[Piece::BR.index()] | self.piece_bb[Piece::BQ.index()]
         };
+        if (magics::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
+            return true;
+        }
 
         let bishop_like_attackers = if by == Color::White {
             self.piece_bb[Piece::WB.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
             self.piece_bb[Piece::BB.index()] | self.piece_bb[Piece::BQ.index()]
         };
-
-        if (magics::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
-            return true;
-        }
-
         if (magics::get_bishop_attacks(square as usize, occ) & bishop_like_attackers) != 0 {
             return true;
         }
@@ -192,31 +192,37 @@ impl Board {
         false
     }
 
+    /// Generates all pseudo-legal moves.
+    pub fn generate_pseudo_legal_moves(&self, out: &mut Vec<Move>) {
+        out.clear();
+        self.gen_pawns(out);
+        self.gen_leapers(out);
+        self.gen_sliders(out);
+    }
+
+    /// Generates all fully legal moves.
     pub fn generate_legal_moves(&mut self, out: &mut Vec<Move>) {
         let mut pseudo = Vec::with_capacity(128);
-        self.gen_pawns(&mut pseudo);
-        self.gen_leapers(&mut pseudo);
-        self.gen_sliders(&mut pseudo);
+        self.generate_pseudo_legal_moves(&mut pseudo);
+
         out.clear();
 
         for m in pseudo {
             let u = self.make_move(m);
-            let opp = self.turn;
-            let my = opp.other();
+            let us = self.turn.other();
 
-            let my_king = if my == Color::White {
-                Piece::WK
-            } else {
-                Piece::BK
-            };
+            let our_king_bb = self.piece_bb[Piece::from_kind(PieceKind::King, us).index()];
+            if our_king_bb == 0 {
+                self.unmake_move(m, u);
+                continue;
+            }
+            let king_sq = our_king_bb.trailing_zeros() as i32;
 
-            let king_sq = self.piece_bb[my_king.index()].trailing_zeros() as i32;
-            let in_check = self.is_square_attacked(king_sq, opp);
-            self.unmake_move(m, u);
-
-            if !in_check {
+            if !self.is_square_attacked(king_sq, self.turn) {
                 out.push(m);
             }
+
+            self.unmake_move(m, u);
         }
     }
 
@@ -331,11 +337,20 @@ impl Board {
         }
     }
 
+    #[inline(always)]
+    fn first_sq(bb: u64) -> Option<i32> {
+        if bb == 0 {
+            None
+        } else {
+            Some(bb.trailing_zeros() as i32)
+        }
+    }
+
     fn gen_leapers(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
-        let kn = if white { Piece::WN } else { Piece::BN };
 
+        let kn = if white { Piece::WN } else { Piece::BN };
         let mut bb = self.piece_bb[kn.index()];
         while bb != 0 {
             let from = bb.trailing_zeros() as i32;
@@ -346,11 +361,9 @@ impl Board {
                 if !in_board(to) {
                     continue;
                 }
-
                 if (file_of(from) - file_of(to)).abs() > 2 {
                     continue;
                 }
-
                 if (friendly & (1u64 << to)) != 0 {
                     continue;
                 }
@@ -369,18 +382,20 @@ impl Board {
         }
 
         let king = if white { Piece::WK } else { Piece::BK };
-        let from = self.piece_bb[king.index()].trailing_zeros() as i32;
+        let king_bb = self.piece_bb[king.index()];
+
+        let Some(from) = Self::first_sq(king_bb) else {
+            return;
+        };
 
         for d in KING_DELTAS {
             let to = from + d;
             if !in_board(to) {
                 continue;
             }
-
             if (file_of(from) - file_of(to)).abs() > 1 {
                 continue;
             }
-
             if (friendly & (1u64 << to)) != 0 {
                 continue;
             }
@@ -397,74 +412,75 @@ impl Board {
             });
         }
 
-        if !self.is_square_attacked(from, self.turn.other()) {
-            if white {
-                if (self.castle & WK_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 5) | (1u64 << 6))) == 0
-                    && !self.is_square_attacked(5, Color::Black)
-                    && !self.is_square_attacked(6, Color::Black)
-                    && self.piece_on[7] == Piece::WR
-                {
-                    out.push(Move {
-                        from: 4,
-                        to: 6,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
-                if (self.castle & WQ_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
-                    && !self.is_square_attacked(3, Color::Black)
-                    && !self.is_square_attacked(2, Color::Black)
-                    && self.piece_on[0] == Piece::WR
-                {
-                    out.push(Move {
-                        from: 4,
-                        to: 2,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
-            } else {
-                if (self.castle & BK_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 61) | (1u64 << 62))) == 0
-                    && !self.is_square_attacked(61, Color::White)
-                    && !self.is_square_attacked(62, Color::White)
-                    && self.piece_on[63] == Piece::BR
-                {
-                    out.push(Move {
-                        from: 60,
-                        to: 62,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
+        if self.is_square_attacked(from, self.turn.other()) {
+            return;
+        }
 
-                if (self.castle & BQ_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
-                    && !self.is_square_attacked(59, Color::White)
-                    && !self.is_square_attacked(58, Color::White)
-                    && self.piece_on[56] == Piece::BR
-                {
-                    out.push(Move {
-                        from: 60,
-                        to: 58,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
+        if white {
+            if (self.castle & WK_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 5) | (1u64 << 6))) == 0
+                && self.piece_on[7] == Piece::WR
+                && !self.is_square_attacked(5, Color::Black)
+                && !self.is_square_attacked(6, Color::Black)
+            {
+                out.push(Move {
+                    from: 4,
+                    to: 6,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+            if (self.castle & WQ_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
+                && self.piece_on[0] == Piece::WR
+                && !self.is_square_attacked(3, Color::Black)
+                && !self.is_square_attacked(2, Color::Black)
+            {
+                out.push(Move {
+                    from: 4,
+                    to: 2,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+        } else {
+            if (self.castle & BK_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 61) | (1u64 << 62))) == 0
+                && self.piece_on[63] == Piece::BR
+                && !self.is_square_attacked(61, Color::White)
+                && !self.is_square_attacked(62, Color::White)
+            {
+                out.push(Move {
+                    from: 60,
+                    to: 62,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+            if (self.castle & BQ_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
+                && self.piece_on[56] == Piece::BR
+                && !self.is_square_attacked(59, Color::White)
+                && !self.is_square_attacked(58, Color::White)
+            {
+                out.push(Move {
+                    from: 60,
+                    to: 58,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
             }
         }
     }
@@ -651,7 +667,7 @@ impl Board {
                 from - 8
             };
             self.en_passant_sq = ep as i32;
-            self.zobrist ^= self.zob.ep_file[(ep % 8) as usize];
+            self.zobrist ^= self.zob.ep_file[ep % 8];
         }
 
         if matches!(moving.kind(), Some(PieceKind::Pawn)) || m.capture {
@@ -700,7 +716,9 @@ impl Board {
 
     pub fn unmake_move(&mut self, m: Move, u: Undo) {
         self.history.pop();
-        self.zobrist = *self.history.last().unwrap_or(&0); // Restore previous hash from history
+        // If history is empty, zobrist should be 0, otherwise pop successfully.
+        self.zobrist = *self.history.last().unwrap_or(&0);
+
         self.turn = self.turn.other();
         if self.turn == Color::Black {
             self.fullmove_number -= 1;
@@ -713,46 +731,60 @@ impl Board {
         let from = m.from as usize;
         let to = m.to as usize;
 
-        let mut moving = self.piece_on[to];
-        if m.promotion.is_some() {
-            let promoted_piece = moving;
-            moving = Piece::from_kind(PieceKind::Pawn, self.turn);
-            self.piece_on[to] = Piece::Empty;
-            self.piece_bb[promoted_piece.index()] ^= 1u64 << to;
+        let piece_that_arrived = self.piece_on[to];
+        let moving_piece = if m.promotion.is_some() {
+            Piece::from_kind(PieceKind::Pawn, self.turn)
         } else {
-            self.piece_on[to] = Piece::Empty;
+            piece_that_arrived
+        };
+
+        self.piece_on[from] = moving_piece;
+        self.piece_bb[moving_piece.index()] |= 1u64 << from;
+        if let Some(c) = moving_piece.color() {
+            if c == Color::White {
+                self.w_pieces |= 1u64 << from;
+            } else {
+                self.b_pieces |= 1u64 << from;
+            }
         }
 
-        self.piece_on[from] = moving;
-        let move_bb = (1u64 << from) | (1u64 << to);
-        self.piece_bb[moving.index()] ^= move_bb;
-        match moving.color() {
-            Some(Color::White) => self.w_pieces ^= move_bb,
-            Some(Color::Black) => self.b_pieces ^= move_bb,
-            _ => {}
+        self.piece_bb[piece_that_arrived.index()] &= !(1u64 << to);
+        if let Some(c) = piece_that_arrived.color() {
+            if c == Color::White {
+                self.w_pieces &= !(1u64 << to);
+            } else {
+                self.b_pieces &= !(1u64 << to);
+            }
         }
 
         if m.capture {
             let captured = u.captured_piece;
-            let cap_sq = if m.en_passant {
-                if self.turn == Color::White {
+            let cap_sq;
+
+            if m.en_passant {
+                self.piece_on[to] = Piece::Empty;
+                cap_sq = if self.turn == Color::White {
                     to - 8
                 } else {
                     to + 8
-                }
+                };
             } else {
-                to
-            };
+                cap_sq = to;
+            }
 
             self.piece_on[cap_sq] = captured;
             if !captured.is_empty() {
                 self.piece_bb[captured.index()] |= 1u64 << cap_sq;
-                match captured.color() {
-                    Some(Color::White) => self.w_pieces |= 1u64 << cap_sq,
-                    Some(Color::Black) => self.b_pieces |= 1u64 << cap_sq,
-                    _ => {}
+                if let Some(c) = captured.color() {
+                    if c == Color::White {
+                        self.w_pieces |= 1u64 << cap_sq;
+                    } else {
+                        self.b_pieces |= 1u64 << cap_sq;
+                    }
                 }
             }
+        } else {
+            self.piece_on[to] = Piece::Empty;
         }
 
         if m.castle {

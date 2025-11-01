@@ -865,7 +865,7 @@ pub fn knight_attacks_from(sq: usize) -> Bitboard {
     for &d in &DELTAS {
         let ns = sq as isize + d;
         if between(ns, 0, 63) {
-            let nf = (ns & 7) as isize;
+            let nf = ns & 7;
             if (nf - f).abs() <= 2 {
                 bb |= 1u64 << ns;
             }
