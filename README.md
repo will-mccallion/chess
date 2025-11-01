@@ -37,3 +37,5 @@ cargo run --release -- play-cli --depth 3
 ```bash
 cargo run --release -- uci
 ```
+
+The opening book is from https://www.chessprogramming.net/new-version-of-the-baron-v3-43-plus-the-barons-polyglot-opening-book/

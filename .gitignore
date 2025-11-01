@@ -3,3 +3,7 @@
 match.pgn
 versions
 moves
+book.bin
+positions
+runs
+tools/export_pst_cp.py

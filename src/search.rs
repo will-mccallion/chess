@@ -2,7 +2,7 @@ use crate::board::Board;
 use crate::eval::evaluate;
 use crate::see::see;
 use crate::tt::{Bound, SharedTransTable};
-use crate::types::{Color, Move, Piece, PieceKind};
+use crate::types::{Color, Move, Piece};
 use crate::uci_io::format_uci;
 use std::cmp::{max, min};
 use std::sync::Arc;
@@ -15,7 +15,13 @@ const MAX_PLY: usize = 256;
 
 const DRAW_CP: i32 = 0;
 const REPETITION_CONTEMPT: i32 = 20;
-const REPEAT_AVOID_MARGIN: i32 = 80;
+
+// Margins for futility pruning, indexed by depth
+const FUTILITY_MARGINS: [i32; 4] = [0, 200, 500, 750];
+
+// Quiescence hardening
+const MAX_QPLY: usize = 64; // absolute QS recursion cap (belt/suspenders)
+const QS_CHECKS: usize = 2; // allow up to 2 plies of quiet-check expansion
 
 #[inline]
 fn repetition_score(static_eval: i32) -> i32 {
@@ -56,12 +62,11 @@ impl SearchCtrl {
                 return true;
             }
         }
-
         false
     }
 }
 
-struct Search<'a> {
+pub struct Search<'a> {
     ctrl: SearchCtrl,
     tt: &'a mut SharedTransTable,
     nodes: u64,
@@ -89,6 +94,7 @@ impl<'a> Search<'a> {
         }
     }
 
+    #[inline]
     fn store_killer(&mut self, m: Move) {
         if self.ply < MAX_PLY {
             if self.killers[self.ply][0] != Some(m) {
@@ -100,18 +106,16 @@ impl<'a> Search<'a> {
 }
 
 fn to_uci_score(s: i32, ply: usize) -> String {
-    let adjusted_score = if s > MATE_THRESHOLD {
+    let adjusted = if s > MATE_THRESHOLD {
         s - ply as i32
     } else if s < -MATE_THRESHOLD {
         s + ply as i32
     } else {
         s
     };
-
-    if adjusted_score.abs() > MATE_THRESHOLD {
-        let plies_to_mate = MATE_SCORE - adjusted_score.abs();
+    if adjusted.abs() > MATE_THRESHOLD {
+        let plies_to_mate = MATE_SCORE - adjusted.abs();
         let moves_to_mate = (plies_to_mate + 1) / 2;
-
         if s > 0 {
             format!("mate {}", moves_to_mate)
         } else {
@@ -122,8 +126,7 @@ fn to_uci_score(s: i32, ply: usize) -> String {
     }
 }
 
-const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000];
-
+#[inline]
 fn score_move(
     b: &Board,
     m: Move,
@@ -134,75 +137,195 @@ fn score_move(
     if Some(m) == tt_move {
         return 2_000_000;
     }
-
     if m.capture {
-        let attacker = b.piece_on[m.from as usize].kind().unwrap();
-        let victim = if m.en_passant {
-            PieceKind::Pawn
-        } else {
-            b.piece_on[m.to as usize].kind().unwrap_or(PieceKind::Pawn)
-        };
-        return 1_000_000 + (PIECE_VALUES[victim as usize] * 10) - PIECE_VALUES[attacker as usize];
+        return 1_000_000 + see(b, m);
     }
-
     if Some(m) == killers[0] {
         return 900_000;
     }
-
     if Some(m) == killers[1] {
         return 850_000;
     }
-
     let piece = b.piece_on[m.from as usize];
     history[piece.index()][m.to as usize]
 }
 
-fn quiesce(b: &mut Board, mut alpha: i32, beta: i32, s: &mut Search) -> i32 {
+#[inline]
+fn is_in_check(b: &Board) -> bool {
+    let king = if b.turn == Color::White {
+        Piece::WK
+    } else {
+        Piece::BK
+    };
+    let ksq = b.piece_bb[king.index()].trailing_zeros() as i32;
+    ksq != 64 && b.is_square_attacked(ksq, b.turn.other())
+}
+
+fn quiesce(b: &mut Board, mut alpha: i32, beta: i32, s: &mut Search, qply: usize) -> i32 {
     if (s.nodes & 4095) == 0 && s.ctrl.time_up(s.nodes) {
         return 0;
     }
     s.nodes += 1;
 
+    if s.ply >= MAX_PLY.saturating_sub(2) || qply >= MAX_QPLY {
+        let sp = evaluate(b);
+        if sp >= beta {
+            return beta;
+        }
+        if sp > alpha {
+            alpha = sp;
+        }
+        return alpha;
+    }
+
+    let in_check = is_in_check(b);
+
+    if in_check {
+        let mut legal = Vec::with_capacity(64);
+        b.generate_legal_moves(&mut legal);
+        if legal.is_empty() {
+            return -MATE_SCORE + s.ply as i32;
+        }
+
+        let mut scored: Vec<(i32, Move)> = Vec::with_capacity(legal.len());
+        for &m in &legal {
+            let sc = if m.capture { 10_000 + see(b, m) } else { 0 };
+            scored.push((sc, m));
+        }
+        scored.sort_by_key(|(sc, _)| -sc);
+
+        for (_, m) in scored {
+            let u = b.make_move(m);
+            s.ply += 1;
+            let score = -quiesce(b, -beta, -alpha, s, qply + 1);
+            s.ply -= 1;
+            b.unmake_move(m, u);
+
+            if s.ctrl.stop_signal.load(Ordering::Relaxed) {
+                return 0;
+            }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+        return alpha;
+    }
+
     let stand_pat = evaluate(b);
     if stand_pat >= beta {
         return beta;
     }
-
     if stand_pat > alpha {
         alpha = stand_pat;
     }
 
-    s.moves.clear();
-    b.generate_legal_moves(&mut s.moves);
-
-    let mut scored_moves = Vec::with_capacity(s.moves.len());
-    for &m in s.moves.iter() {
-        if !m.capture && m.promotion.is_none() {
-            continue;
-        }
-        if m.capture && see(b, m) < 0 {
-            continue;
-        }
-        let score = score_move(b, m, None, &[None, None], &s.history);
-        scored_moves.push((score, m));
+    const QUEEN_VAL: i32 = 900;
+    if stand_pat + QUEEN_VAL < alpha {
+        return alpha;
     }
-    scored_moves.sort_by_key(|(score, _)| -*score);
 
-    for (_, m) in scored_moves {
-        let u = b.make_move(m);
-        s.ply += 1;
-        let score = -quiesce(b, -beta, -alpha, s);
-        s.ply -= 1;
-        b.unmake_move(m, u);
+    let mut moves = Vec::with_capacity(64);
+    b.generate_legal_moves(&mut moves);
 
-        if s.ctrl.stop_signal.load(Ordering::Relaxed) {
-            return 0;
+    {
+        let mut scored: Vec<(i32, Move)> = Vec::new();
+        scored.reserve(moves.len());
+
+        for &m in &moves {
+            if m.capture {
+                let see_score = see(b, m);
+                if see_score < 0 {
+                    continue;
+                }
+                scored.push((100_000 + see_score, m));
+            } else if m.promotion.is_some() {
+                scored.push((50_000, m));
+            }
         }
-        if score >= beta {
-            return beta;
+
+        scored.sort_by_key(|(sc, _)| -sc);
+
+        for (_, m) in scored {
+            let u = b.make_move(m);
+            s.ply += 1;
+            let score = -quiesce(b, -beta, -alpha, s, qply + 1);
+            s.ply -= 1;
+            b.unmake_move(m, u);
+
+            if s.ctrl.stop_signal.load(Ordering::Relaxed) {
+                return 0;
+            }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
         }
-        if score > alpha {
-            alpha = score;
+    }
+
+    if qply < QS_CHECKS {
+        let mut checkers: Vec<Move> = Vec::new();
+        for &m in &moves {
+            if m.capture || m.promotion.is_some() || m.castle || m.en_passant {
+                continue;
+            }
+
+            let u = b.make_move(m);
+            let opp_king = if b.turn == Color::White {
+                Piece::WK
+            } else {
+                Piece::BK
+            };
+            let opp_ksq = b.piece_bb[opp_king.index()].trailing_zeros() as i32;
+            let gives_check = opp_ksq != 64 && b.is_square_attacked(opp_ksq, b.turn.other());
+            b.unmake_move(m, u);
+
+            if !gives_check {
+                continue;
+            }
+
+            const QCHECK_MARGIN: i32 = 150;
+            if stand_pat + QCHECK_MARGIN <= alpha {
+                continue;
+            }
+
+            checkers.push(m);
+        }
+
+        if !checkers.is_empty() {
+            let killers = if s.ply < MAX_PLY {
+                s.killers[s.ply]
+            } else {
+                [None; 2]
+            };
+            let tt_move = s.tt.probe(b.zobrist).and_then(|e| e.best_move());
+            let mut scored: Vec<(i32, Move)> = checkers
+                .into_iter()
+                .map(|m| (score_move(b, m, tt_move, &killers, &s.history), m))
+                .collect();
+            scored.sort_by_key(|(sc, _)| -*sc);
+
+            for (_, m) in scored {
+                let u = b.make_move(m);
+                s.ply += 1;
+                let score = -quiesce(b, -beta, -alpha, s, qply + 1);
+                s.ply -= 1;
+                b.unmake_move(m, u);
+
+                if s.ctrl.stop_signal.load(Ordering::Relaxed) {
+                    return 0;
+                }
+                if score >= beta {
+                    return beta;
+                }
+                if score > alpha {
+                    alpha = score;
+                }
+            }
         }
     }
 
@@ -221,15 +344,12 @@ fn negamax(
         return 0;
     }
 
-    let stand_pat_here = evaluate(b);
+    if s.ply >= MAX_PLY.saturating_sub(2) {
+        return quiesce(b, alpha, beta, s, 0);
+    }
 
-    if s.ply > 0 {
-        if b.halfmove_clock >= 100 {
-            return DRAW_CP;
-        }
-        if b.is_draw_by_repetition() {
-            return repetition_score(stand_pat_here);
-        }
+    if s.ply > 0 && (b.halfmove_clock >= 100 || b.is_draw_by_repetition()) {
+        return repetition_score(evaluate(b));
     }
 
     let is_root = s.ply == 0;
@@ -246,34 +366,35 @@ fn negamax(
     } else {
         Piece::BK
     };
-
     let ksq = b.piece_bb[king.index()].trailing_zeros() as i32;
     let in_check = ksq != 64 && b.is_square_attacked(ksq, b.turn.other());
 
     if in_check {
-        depth += 1;
+        depth += 1; // check extension
     }
     if depth <= 0 {
-        return quiesce(b, alpha, beta, s);
+        return quiesce(b, alpha, beta, s, 0);
     }
-
-    s.nodes += 1;
 
     let zobrist_key = b.zobrist;
     if !is_root {
         if let Some(e) = s.tt.probe(zobrist_key) {
-            if e.depth >= depth as i16 {
-                let score = e.score;
-                if e.bound == Bound::Exact {
-                    return score;
-                }
-                if e.bound == Bound::Lower && score >= beta {
-                    return score;
-                }
-                if e.bound == Bound::Upper && score <= alpha {
-                    return score;
+            if e.depth() >= depth as i16 {
+                let score = e.score();
+                match e.bound() {
+                    Bound::Exact => return score,
+                    Bound::Lower if score >= beta => return score,
+                    Bound::Upper if score <= alpha => return score,
+                    _ => {}
                 }
             }
+        }
+    }
+
+    if !is_pv && !in_check && depth < 4 {
+        let eval = evaluate(b);
+        if eval + FUTILITY_MARGINS[depth as usize] <= alpha {
+            return alpha;
         }
     }
 
@@ -283,12 +404,12 @@ fn negamax(
         let score = -negamax(b, -beta, -beta + 1, depth - 1 - 2, s, false);
         s.ply -= 1;
         b.unmake_null_move(u);
-
         if score >= beta {
             return beta;
         }
     }
 
+    s.nodes += 1;
     s.moves.clear();
     b.generate_legal_moves(&mut s.moves);
     if s.moves.is_empty() {
@@ -299,13 +420,12 @@ fn negamax(
         };
     }
 
-    let tt_move = s.tt.probe(zobrist_key).and_then(|e| e.best_move);
+    let tt_move = s.tt.probe(zobrist_key).and_then(|e| e.best_move());
     let killers = if s.ply < MAX_PLY {
         s.killers[s.ply]
     } else {
         [None; 2]
     };
-
     let mut scored_moves: Vec<_> = s
         .moves
         .iter()
@@ -315,83 +435,61 @@ fn negamax(
 
     let mut best_score = -MATE_SCORE;
     let mut best_move: Option<Move> = None;
-    let mut moves_searched = 0;
 
-    for (_, m) in scored_moves {
-        if !in_check && !is_pv && depth <= 3 && m.capture && see(b, m) < 0 {
-            continue;
-        }
-
-        let reduction = if depth >= 3 && moves_searched >= 3 && !m.capture && m.promotion.is_none()
-        {
-            if moves_searched >= 6 { 2 } else { 1 }
-        } else {
-            0
-        };
-
-        let u = b.make_move(m);
+    for (i, (_, m)) in scored_moves.iter().enumerate() {
+        let u = b.make_move(*m);
         s.ply += 1;
 
         let score: i32;
-
-        if b.is_draw_by_repetition() {
-            if s.ply == 1 && stand_pat_here > REPEAT_AVOID_MARGIN {
-                score = -MATE_SCORE + 1;
-            } else {
-                score = -repetition_score(stand_pat_here);
-            }
+        if i == 0 {
+            score = -negamax(b, -beta, -alpha, depth - 1, s, true);
         } else {
-            if moves_searched == 0 {
+            // LMR
+            let reduction =
+                if depth >= 3 && i >= 3 && !m.capture && m.promotion.is_none() && !in_check {
+                    if i >= 6 || depth > 6 { 2 } else { 1 }
+                } else {
+                    0
+                };
+
+            let mut current = -negamax(b, -alpha - 1, -alpha, depth - 1 - reduction, s, false);
+            if current > alpha && reduction > 0 {
+                current = -negamax(b, -alpha - 1, -alpha, depth - 1, s, false);
+            }
+            if current > alpha && current < beta {
                 score = -negamax(b, -beta, -alpha, depth - 1, s, true);
             } else {
-                let mut s1 = -negamax(b, -alpha - 1, -alpha, depth - 1 - reduction, s, false);
-                if s1 > alpha && s1 < beta {
-                    s1 = -negamax(b, -beta, -alpha, depth - 1, s, false);
-                }
-                score = s1;
+                score = current;
             }
         }
 
         s.ply -= 1;
-        b.unmake_move(m, u);
+        b.unmake_move(*m, u);
 
         if s.ctrl.time_up(s.nodes) {
             return 0;
         }
-
         if score > best_score {
             best_score = score;
-            best_move = Some(m);
+            best_move = Some(*m);
         }
-
         if best_score > alpha {
             alpha = best_score;
         }
-
         if alpha >= beta {
             if !m.capture {
                 s.history[b.piece_on[m.from as usize].index()][m.to as usize] += depth * depth;
-                s.store_killer(m);
+                s.store_killer(*m);
             }
-
-            if best_score != DRAW_CP
-                && best_score != REPETITION_CONTEMPT
-                && best_score != -REPETITION_CONTEMPT
-                && best_score != (-MATE_SCORE + 1)
-            {
-                s.tt.store(
-                    zobrist_key,
-                    depth as i16,
-                    best_score,
-                    Bound::Lower,
-                    best_move,
-                );
-            }
-
+            s.tt.store(
+                zobrist_key,
+                depth as i16,
+                best_score,
+                Bound::Lower,
+                best_move,
+            );
             return best_score;
         }
-
-        moves_searched += 1;
     }
 
     let bound = if best_score <= alpha_orig {
@@ -399,15 +497,7 @@ fn negamax(
     } else {
         Bound::Exact
     };
-
-    if best_score != DRAW_CP
-        && best_score != REPETITION_CONTEMPT
-        && best_score != -REPETITION_CONTEMPT
-        && best_score != (-MATE_SCORE + 1)
-    {
-        s.tt.store(zobrist_key, depth as i16, best_score, bound, best_move);
-    }
-
+    s.tt.store(zobrist_key, depth as i16, best_score, bound, best_move);
     best_score
 }
 
@@ -415,10 +505,9 @@ pub fn extract_pv(mut pos: Board, tt: &SharedTransTable, max_len: usize) -> Vec<
     let mut pv = Vec::with_capacity(max_len);
     for _ in 0..max_len {
         if let Some(e) = tt.probe(pos.zobrist) {
-            if let Some(m) = e.best_move {
+            if let Some(m) = e.best_move() {
                 let mut legal_moves = Vec::new();
                 pos.generate_legal_moves(&mut legal_moves);
-
                 if legal_moves.contains(&m) {
                     pv.push(m);
                     let _u = pos.make_move(m);
@@ -428,7 +517,6 @@ pub fn extract_pv(mut pos: Board, tt: &SharedTransTable, max_len: usize) -> Vec<
         }
         break;
     }
-
     pv
 }
 
@@ -441,7 +529,6 @@ pub fn best_move_timed(
     is_main_thread: bool,
 ) -> (Option<Move>, usize, u64) {
     let mut pos = b.clone();
-
     if is_main_thread {
         tt.tick_age();
     }
@@ -454,7 +541,6 @@ pub fn best_move_timed(
     for d in 1..=max_depth {
         let mut alpha = -MATE_SCORE;
         let mut beta = MATE_SCORE;
-
         if d > 3 {
             alpha = score - 50;
             beta = score + 50;
@@ -465,7 +551,6 @@ pub fn best_move_timed(
             if search.ctrl.time_up(search.nodes) {
                 break;
             }
-
             if score <= alpha {
                 alpha = -MATE_SCORE;
             } else if score >= beta {
@@ -478,14 +563,13 @@ pub fn best_move_timed(
         if search.ctrl.time_up(search.nodes) && d > 1 {
             break;
         }
-
         if !is_main_thread && search.ctrl.stop_signal.load(Ordering::Relaxed) {
             break;
         }
 
         reached_depth = d;
         if let Some(e) = search.tt.probe(pos.zobrist) {
-            best_move = e.best_move;
+            best_move = e.best_move();
         }
 
         if is_main_thread {
@@ -495,7 +579,6 @@ pub fn best_move_timed(
             } else {
                 0
             };
-
             let hashfull = search.tt.hashfull_permill();
             let pv = extract_pv(pos.clone(), search.tt, d);
             let pv_str = pv
@@ -503,9 +586,7 @@ pub fn best_move_timed(
                 .map(|&m| format_uci(m))
                 .collect::<Vec<_>>()
                 .join(" ");
-
             let info_score = to_uci_score(score, search.ply);
-
             println!(
                 "info depth {} score {} nodes {} nps {} time {} hashfull {} pv {}",
                 d, info_score, search.nodes, nps, elapsed_ms, hashfull, pv_str
@@ -516,7 +597,6 @@ pub fn best_move_timed(
             break;
         }
     }
-
     (best_move, reached_depth, search.nodes)
 }
 

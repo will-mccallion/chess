@@ -1,3 +1,5 @@
+// FILE: src/main.rs
+
 use chess::board::Board;
 use chess::perft::{divide, perft};
 use chess::search::{best_move_timed, extract_pv};
@@ -11,9 +13,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+// Large stacks for deep recursion paths in helpers.
+const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
+
 #[derive(Parser)]
 #[command(
-    name = "chesser",
+    name = "chess",
     version,
     about = "Chess engine with perft/uci/play modes"
 )]
@@ -141,7 +146,7 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
 
             if user_move_opt.is_none() {
                 for &legal_move in &legal_moves {
-                    // --- THIS IS THE CORRECTED LINE ---
+                    // remove check/mate suffix to accept "Nf3" style inputs
                     let san_str = b.to_san(legal_move, &legal_moves).replace(['+', '#'], "");
                     if san_str == input_str {
                         user_move_opt = Some(legal_move);
@@ -180,22 +185,29 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
         let stop_signal = Arc::new(AtomicBool::new(false));
         let mut helpers = vec![];
 
-        for _ in 0..(threads_count - 1) {
+        // Conservative recursion cap for helpers to avoid stack blowups
+        let helper_depth = max_depth.min(64);
+
+        for i in 0..(threads_count - 1) {
             let board_clone = b.clone();
             let tt_clone = tt.clone();
             let stop_clone = Arc::clone(&stop_signal);
-            let handle = thread::spawn(move || {
-                let mut tt_local = tt_clone;
-                best_move_timed(
-                    &board_clone,
-                    &mut tt_local,
-                    u64::MAX / 4,
-                    max_depth,
-                    stop_clone,
-                    false,
-                );
-            });
-            helpers.push(handle);
+            let name = format!("helper-{}", i);
+            let _ = thread::Builder::new()
+                .name(name)
+                .stack_size(SEARCH_THREAD_STACK)
+                .spawn(move || {
+                    let mut tt_local = tt_clone;
+                    best_move_timed(
+                        &board_clone,
+                        &mut tt_local,
+                        u64::MAX / 4,
+                        helper_depth,
+                        stop_clone,
+                        false,
+                    );
+                })
+                .map(|jh| helpers.push(jh));
         }
 
         let (engine_move_opt, _, _) = best_move_timed(
@@ -237,18 +249,21 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
                 ponder_state.stop_signal.store(false, Ordering::Relaxed);
                 let stop_clone = Arc::clone(&ponder_state.stop_signal);
 
-                let handle = thread::spawn(move || {
-                    let mut tt_local = tt_clone;
-                    best_move_timed(
-                        &ponder_board,
-                        &mut tt_local,
-                        u64::MAX / 4,
-                        max_depth,
-                        stop_clone,
-                        false,
-                    );
-                });
-                ponder_state.handle = Some(handle);
+                let _ = thread::Builder::new()
+                    .name("ponder-helper-cli".to_string())
+                    .stack_size(SEARCH_THREAD_STACK)
+                    .spawn(move || {
+                        let mut tt_local = tt_clone;
+                        best_move_timed(
+                            &ponder_board,
+                            &mut tt_local,
+                            u64::MAX / 4,
+                            helper_depth,
+                            stop_clone,
+                            false,
+                        );
+                    })
+                    .map(|h| ponder_state.handle = Some(h));
             }
         }
     }

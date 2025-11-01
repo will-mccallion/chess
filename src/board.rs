@@ -122,15 +122,15 @@ impl Board {
         } else {
             Piece::BP
         };
-
-        let dir = if by == Color::White { -8 } else { 8 };
+        let dir = if by == Color::White { -8 } else { 8 }; // from 'square', a pawn of 'by' would sit one rank behind
         let f = file_of(square);
 
+        // capture-left
         let s1 = square + dir - 1;
         if f > 0 && in_board(s1) && self.piece_on[s1 as usize] == pawn {
             return true;
         }
-
+        // capture-right
         let s2 = square + dir + 1;
         if f < 7 && in_board(s2) && self.piece_on[s2 as usize] == pawn {
             return true;
@@ -141,13 +141,18 @@ impl Board {
         } else {
             Piece::BN
         };
-
         for d in KNIGHT_DELTAS {
             let to = square + d;
             if !in_board(to) {
                 continue;
             }
-            if (file_of(square) - file_of(to)).abs() <= 2 && self.piece_on[to as usize] == n {
+            // prevent wrap: both file *and* rank must be within knight move bounds
+            if (file_of(square) - file_of(to)).abs() > 2
+                || (rank_of(square) - rank_of(to)).abs() > 2
+            {
+                continue;
+            }
+            if self.piece_on[to as usize] == n {
                 return true;
             }
         }
@@ -157,34 +162,40 @@ impl Board {
         } else {
             Piece::BK
         };
-
         for d in KING_DELTAS {
             let to = square + d;
             if !in_board(to) {
                 continue;
             }
-            if (file_of(square) - file_of(to)).abs() <= 1 && self.piece_on[to as usize] == k {
+            // prevent wrap: king moves at most 1 file and 1 rank
+            if (file_of(square) - file_of(to)).abs() > 1
+                || (rank_of(square) - rank_of(to)).abs() > 1
+            {
+                continue;
+            }
+            if self.piece_on[to as usize] == k {
                 return true;
             }
         }
 
         let occ = self.all_pieces;
+
+        // rook-like
         let rook_like_attackers = if by == Color::White {
             self.piece_bb[Piece::WR.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
             self.piece_bb[Piece::BR.index()] | self.piece_bb[Piece::BQ.index()]
         };
+        if (magics::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
+            return true;
+        }
 
+        // bishop-like
         let bishop_like_attackers = if by == Color::White {
             self.piece_bb[Piece::WB.index()] | self.piece_bb[Piece::WQ.index()]
         } else {
             self.piece_bb[Piece::BB.index()] | self.piece_bb[Piece::BQ.index()]
         };
-
-        if (magics::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
-            return true;
-        }
-
         if (magics::get_bishop_attacks(square as usize, occ) & bishop_like_attackers) != 0 {
             return true;
         }
@@ -194,24 +205,33 @@ impl Board {
 
     pub fn generate_legal_moves(&mut self, out: &mut Vec<Move>) {
         let mut pseudo = Vec::with_capacity(128);
+
+        // Generate all pseudo-legal moves
         self.gen_pawns(&mut pseudo);
         self.gen_leapers(&mut pseudo);
         self.gen_sliders(&mut pseudo);
+
         out.clear();
 
+        // Filter by legality (king not left in check)
         for m in pseudo {
             let u = self.make_move(m);
+
+            // After make_move, it's opponent's turn. The side that just moved is:
+            let us = self.turn.other();
             let opp = self.turn;
-            let my = opp.other();
 
-            let my_king = if my == Color::White {
-                Piece::WK
-            } else {
-                Piece::BK
-            };
+            // Locate our king square robustly
+            let our_king_bb = self.piece_bb[Piece::from_kind(PieceKind::King, us).index()];
+            // Safety: if something went very wrong, skip this move
+            if our_king_bb == 0 {
+                self.unmake_move(m, u);
+                continue;
+            }
+            let king_sq = our_king_bb.trailing_zeros() as i32;
 
-            let king_sq = self.piece_bb[my_king.index()].trailing_zeros() as i32;
             let in_check = self.is_square_attacked(king_sq, opp);
+
             self.unmake_move(m, u);
 
             if !in_check {
@@ -331,11 +351,20 @@ impl Board {
         }
     }
 
+    #[inline(always)]
+    fn first_sq(bb: u64) -> Option<i32> {
+        if bb == 0 {
+            None
+        } else {
+            Some(bb.trailing_zeros() as i32)
+        }
+    }
+
     fn gen_leapers(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
-        let kn = if white { Piece::WN } else { Piece::BN };
 
+        let kn = if white { Piece::WN } else { Piece::BN };
         let mut bb = self.piece_bb[kn.index()];
         while bb != 0 {
             let from = bb.trailing_zeros() as i32;
@@ -346,11 +375,12 @@ impl Board {
                 if !in_board(to) {
                     continue;
                 }
-
-                if (file_of(from) - file_of(to)).abs() > 2 {
+                // keep knight geometry within 2 files/ranks to prevent wrap
+                if (file_of(from) - file_of(to)).abs() > 2
+                    || (rank_of(from) - rank_of(to)).abs() > 2
+                {
                     continue;
                 }
-
                 if (friendly & (1u64 << to)) != 0 {
                     continue;
                 }
@@ -369,18 +399,23 @@ impl Board {
         }
 
         let king = if white { Piece::WK } else { Piece::BK };
-        let from = self.piece_bb[king.index()].trailing_zeros() as i32;
+        let king_bb = self.piece_bb[king.index()];
 
+        // If the side-to-move has no king on the board (perft test contains such illegal setups),
+        // skip king moves and castling entirely. Prevents .trailing_zeros()==64 and sq=64 usage.
+        let Some(from) = Self::first_sq(king_bb) else {
+            return; // knights already generated
+        };
+
+        // King step moves
         for d in KING_DELTAS {
             let to = from + d;
             if !in_board(to) {
                 continue;
             }
-
-            if (file_of(from) - file_of(to)).abs() > 1 {
+            if (file_of(from) - file_of(to)).abs() > 1 || (rank_of(from) - rank_of(to)).abs() > 1 {
                 continue;
             }
-
             if (friendly & (1u64 << to)) != 0 {
                 continue;
             }
@@ -397,74 +432,78 @@ impl Board {
             });
         }
 
-        if !self.is_square_attacked(from, self.turn.other()) {
-            if white {
-                if (self.castle & WK_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 5) | (1u64 << 6))) == 0
-                    && !self.is_square_attacked(5, Color::Black)
-                    && !self.is_square_attacked(6, Color::Black)
-                    && self.piece_on[7] == Piece::WR
-                {
-                    out.push(Move {
-                        from: 4,
-                        to: 6,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
-                if (self.castle & WQ_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
-                    && !self.is_square_attacked(3, Color::Black)
-                    && !self.is_square_attacked(2, Color::Black)
-                    && self.piece_on[0] == Piece::WR
-                {
-                    out.push(Move {
-                        from: 4,
-                        to: 2,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
-            } else {
-                if (self.castle & BK_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 61) | (1u64 << 62))) == 0
-                    && !self.is_square_attacked(61, Color::White)
-                    && !self.is_square_attacked(62, Color::White)
-                    && self.piece_on[63] == Piece::BR
-                {
-                    out.push(Move {
-                        from: 60,
-                        to: 62,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
+        // Castling (only if the king exists and is not currently in check)
+        if self.is_square_attacked(from, self.turn.other()) {
+            return;
+        }
 
-                if (self.castle & BQ_CASTLE) != 0
-                    && (self.all_pieces & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
-                    && !self.is_square_attacked(59, Color::White)
-                    && !self.is_square_attacked(58, Color::White)
-                    && self.piece_on[56] == Piece::BR
-                {
-                    out.push(Move {
-                        from: 60,
-                        to: 58,
-                        capture: false,
-                        en_passant: false,
-                        double_push: false,
-                        castle: true,
-                        promotion: None,
-                    });
-                }
+        if white {
+            // White: e1=4
+            if (self.castle & WK_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 5) | (1u64 << 6))) == 0
+                && self.piece_on[7] == Piece::WR
+                && !self.is_square_attacked(5, Color::Black)
+                && !self.is_square_attacked(6, Color::Black)
+            {
+                out.push(Move {
+                    from: 4,
+                    to: 6,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+            if (self.castle & WQ_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
+                && self.piece_on[0] == Piece::WR
+                && !self.is_square_attacked(3, Color::Black)
+                && !self.is_square_attacked(2, Color::Black)
+            {
+                out.push(Move {
+                    from: 4,
+                    to: 2,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+        } else {
+            // Black: e8=60
+            if (self.castle & BK_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 61) | (1u64 << 62))) == 0
+                && self.piece_on[63] == Piece::BR
+                && !self.is_square_attacked(61, Color::White)
+                && !self.is_square_attacked(62, Color::White)
+            {
+                out.push(Move {
+                    from: 60,
+                    to: 62,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
+            }
+            if (self.castle & BQ_CASTLE) != 0
+                && (self.all_pieces & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
+                && self.piece_on[56] == Piece::BR
+                && !self.is_square_attacked(59, Color::White)
+                && !self.is_square_attacked(58, Color::White)
+            {
+                out.push(Move {
+                    from: 60,
+                    to: 58,
+                    capture: false,
+                    en_passant: false,
+                    double_push: false,
+                    castle: true,
+                    promotion: None,
+                });
             }
         }
     }
