@@ -1,6 +1,6 @@
 [package]
 name = "chess"
-version = "5.0.0"
+version = "5.3.0"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,7 @@ clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 num_cpus = "1.16.0"
 byteorder = "1.4"
+once_cell = "*"
 
 [profile.release]
 opt-level = 3

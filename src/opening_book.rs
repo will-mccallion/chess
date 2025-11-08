@@ -136,7 +136,7 @@ static BOOK: OnceLock<Option<OpeningBook>> = OnceLock::new();
 
 fn get_book() -> &'static Option<OpeningBook> {
     BOOK.get_or_init(|| {
-        let book_filename = "book.bin";
+        let book_filename = "moves/book.bin";
         let mut potential_paths: Vec<PathBuf> = Vec::new();
 
         if let Ok(mut exe_path) = std::env::current_exe() {
@@ -147,6 +147,8 @@ fn get_book() -> &'static Option<OpeningBook> {
         if let Ok(cwd) = std::env::current_dir() {
             potential_paths.push(cwd.join(book_filename));
         }
+
+        potential_paths.push(PathBuf::from("/home/will/projects/chess/moves/book.bin"));
 
         if let Ok(exe_path) = std::env::current_exe()
             && exe_path.to_string_lossy().contains("target")

@@ -1,6 +1,7 @@
 use chess::board::Board;
+use chess::nnue;
 use chess::perft::{divide, perft};
-use chess::search::{best_move_timed, extract_pv};
+use chess::search::{best_move_timed, get_pv_from_tt};
 use chess::tt::SharedTransTable;
 use chess::types::{Color, Move, Piece, PieceKind, START_FEN};
 use chess::uci;
@@ -41,8 +42,8 @@ enum Cmd {
         time: u64,
         #[arg(long, default_value_t = 64)]
         depth: usize,
-        #[arg(long)]
-        threads: Option<usize>,
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
     SelfPlay {
         #[arg(long, default_value_t = 10)]
@@ -60,6 +61,16 @@ enum Cmd {
 }
 
 fn main() {
+    const NNUE_PATH: &str = "/home/will/projects/chess/moves/nn-9931db908a9b.nnue";
+
+    // Initialize the NNUE network.
+    // Panicking is reasonable here; if the network can't load, the engine can't run.
+    if let Err(e) = nnue::init(NNUE_PATH) {
+        panic!("Failed to load NNUE file at '{}': {}", NNUE_PATH, e);
+    }
+
+    println!("NNUE loaded successfully.");
+
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Uci) {
         Cmd::Perft {
@@ -85,13 +96,12 @@ fn main() {
             depth,
             threads,
         } => {
-            let threads_count = threads.unwrap_or_else(num_cpus::get).max(1);
             let fen_str = fen.unwrap_or_else(|| START_FEN.to_string());
             let mut b = Board::from_fen(&fen_str).unwrap_or_else(|e| {
                 eprintln!("FEN parse error: {e}");
                 std::process::exit(1);
             });
-            play_cli(&mut b, time, depth, threads_count);
+            play_cli(&mut b, time, depth, threads);
         }
         Cmd::SelfPlay {
             rounds,
@@ -377,7 +387,7 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
             break;
         };
 
-        let pv = extract_pv(b.clone(), &tt, 2);
+        let pv = get_pv_from_tt(b.clone(), &tt, 2);
         ponder_move_opt = pv.get(1).copied();
 
         println!("\n--------------------------------");

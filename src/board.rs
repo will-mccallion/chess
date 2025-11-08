@@ -42,14 +42,22 @@ impl Board {
         }
     }
 
+    #[inline(always)]
+    pub fn king_square(&self, c: Color) -> u32 {
+        let king_piece = Piece::from_kind(PieceKind::King, c);
+        self.piece_bb[king_piece.index()].trailing_zeros()
+    }
+
     pub fn from_fen(fen_str: &str) -> Result<Self, String> {
         fen::parse_fen(fen_str)
     }
 
+    #[inline]
     pub fn place_piece(&mut self, p: Piece, sq: usize) {
         self.piece_on[sq] = p;
     }
 
+    #[inline]
     pub fn rebuild_derived(&mut self) {
         self.piece_bb = [0; 13];
         self.w_pieces = 0;
@@ -70,6 +78,7 @@ impl Board {
         self.all_pieces = self.w_pieces | self.b_pieces;
     }
 
+    #[inline]
     pub fn recompute_zobrist(&mut self) {
         let mut h = 0u64;
 
@@ -93,6 +102,7 @@ impl Board {
         self.zobrist = h;
     }
 
+    #[inline]
     pub fn count_repetitions(&self) -> usize {
         let current_key = self.zobrist;
         let mut count = 0;
@@ -113,10 +123,12 @@ impl Board {
         count
     }
 
+    #[inline]
     pub fn is_draw_by_repetition(&self) -> bool {
         self.count_repetitions() >= 2
     }
 
+    #[inline]
     pub fn is_square_attacked(&self, square: i32, by: Color) -> bool {
         let pawn = if by == Color::White {
             Piece::WP
@@ -193,6 +205,7 @@ impl Board {
     }
 
     /// Generates all pseudo-legal moves.
+    #[inline]
     pub fn generate_pseudo_legal_moves(&self, out: &mut Vec<Move>) {
         out.clear();
         self.gen_pawns(out);
@@ -201,6 +214,7 @@ impl Board {
     }
 
     /// Generates all fully legal moves.
+    #[inline]
     pub fn generate_legal_moves(&mut self, out: &mut Vec<Move>) {
         let mut pseudo = Vec::with_capacity(128);
         self.generate_pseudo_legal_moves(&mut pseudo);
@@ -346,6 +360,7 @@ impl Board {
         }
     }
 
+    #[inline]
     fn gen_leapers(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
@@ -485,6 +500,7 @@ impl Board {
         }
     }
 
+    #[inline]
     fn gen_sliders(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
@@ -568,6 +584,7 @@ impl Board {
         }
     }
 
+    #[inline]
     pub fn make_move(&mut self, m: Move) -> Undo {
         let mut undo = Undo {
             captured_piece: Piece::Empty,
@@ -714,6 +731,7 @@ impl Board {
         undo
     }
 
+    #[inline]
     pub fn unmake_move(&mut self, m: Move, u: Undo) {
         self.history.pop();
         // If history is empty, zobrist should be 0, otherwise pop successfully.
@@ -809,6 +827,7 @@ impl Board {
         self.all_pieces = self.w_pieces | self.b_pieces;
     }
 
+    #[inline]
     pub fn make_null_move(&mut self) -> Undo {
         let undo = Undo {
             captured_piece: Piece::Empty,
@@ -830,6 +849,7 @@ impl Board {
         undo
     }
 
+    #[inline]
     pub fn unmake_null_move(&mut self, u: Undo) {
         self.history.pop();
         self.zobrist = *self.history.last().unwrap_or(&0);
@@ -838,6 +858,7 @@ impl Board {
         self.halfmove_clock = u.old_halfmove_clock;
     }
 
+    #[inline]
     pub fn to_fen(&self) -> String {
         fen::to_fen(self)
     }
