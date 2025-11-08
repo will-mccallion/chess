@@ -1,6 +1,6 @@
 use crate::board::Board;
 use crate::opening_book::get_book_move;
-use crate::search::{best_move_timed, extract_pv};
+use crate::search::best_move_timed;
 use crate::time::TimeControl;
 use crate::tt::SharedTransTable;
 use crate::types::{Color, START_FEN};
@@ -13,6 +13,7 @@ use std::thread;
 
 const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
 
+#[inline]
 fn extract_i64(cmd: &str, key: &str) -> Option<i64> {
     for tok in cmd.split_whitespace().collect::<Vec<_>>().windows(2) {
         if let Ok(v) = tok[1].parse::<i64>()
@@ -24,6 +25,7 @@ fn extract_i64(cmd: &str, key: &str) -> Option<i64> {
     None
 }
 
+#[inline]
 fn parse_setoption(rest: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = rest.splitn(2, "name").collect();
     let after = parts.get(1)?.trim();
@@ -51,6 +53,8 @@ impl PonderState {
             enabled: false,
         }
     }
+
+    #[inline]
     fn stop_and_join(&mut self) {
         if let Some(sig) = &self.stop_signal {
             sig.store(true, Ordering::Relaxed);
@@ -75,16 +79,20 @@ fn search_and_output(
     stop: Arc<AtomicBool>,
     main_thread: bool,
 ) {
-    let (best, reached_depth, _nodes) =
+    let (best, _reached_depth, _nodes) =
         best_move_timed(b, tt, time_ms, depth, Arc::clone(&stop), main_thread);
 
     if let Some(m) = best {
-        let pv = extract_pv(b.clone(), tt, reached_depth.max(32));
-        if let Some(pm) = pv.get(1).copied() {
-            println!("bestmove {} ponder {}", format_uci(m), format_uci(pm));
-        } else {
-            println!("bestmove {}", format_uci(m));
+        let mut ponder_str = String::new();
+        let mut temp_board = b.clone();
+        temp_board.make_move(m);
+        if let Some(ponder_move) = tt.probe(temp_board.zobrist).and_then(|e| e.best_move()) {
+            // Fast check: is the ponder move for a piece that can actually move from that square?
+            if temp_board.piece_on[ponder_move.from as usize].color() == Some(temp_board.turn) {
+                ponder_str = format!(" ponder {}", format_uci(ponder_move));
+            }
         }
+        println!("bestmove {}{}", format_uci(m), ponder_str);
     } else {
         println!("bestmove 0000");
     }
@@ -95,7 +103,7 @@ pub fn run_uci() {
     let mut b = Board::from_fen(START_FEN).expect("valid startpos");
     let mut tc = TimeControl::default();
 
-    let mut tt_size_mb: usize = 1024;
+    let mut tt_size_mb: usize = 256;
     let mut tt = SharedTransTable::new(tt_size_mb);
     let mut threads_count: usize = num_cpus::get().max(1);
     let mut ponder = PonderState::new();
@@ -108,7 +116,7 @@ pub fn run_uci() {
         let cmd = line.trim();
 
         if cmd.eq_ignore_ascii_case("uci") {
-            println!("id name Rusty-Improved");
+            println!("id name chess");
             println!("id author Will");
             println!(
                 "option name Hash type spin default {} min 1 max 4096",
@@ -203,8 +211,7 @@ pub fn run_uci() {
 
         if cmd.eq_ignore_ascii_case("stop") {
             ponder.stop_and_join();
-            let pv = extract_pv(b.clone(), &tt, 1);
-            if let Some(best) = pv.first().copied() {
+            if let Some(best) = tt.probe(b.zobrist).and_then(|e| e.best_move()) {
                 println!("bestmove {}", format_uci(best));
             } else {
                 println!("bestmove 0000");
@@ -230,8 +237,8 @@ pub fn run_uci() {
                 .split_whitespace()
                 .any(|t| t.eq_ignore_ascii_case("infinite"));
 
-            let depth = extract_i64(rest, "depth").map_or(64, |d| d.max(1) as usize);
-            let helper_depth = depth.min(64);
+            let depth = extract_i64(rest, "depth").map_or(128, |d| d.max(1) as usize);
+            let helper_depth = depth.min(128);
 
             tc.wtime = extract_i64(rest, "wtime").unwrap_or(0);
             tc.btime = extract_i64(rest, "btime").unwrap_or(0);

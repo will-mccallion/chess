@@ -88,5 +88,5 @@ impl SharedPawnTable {
 static PAWN_TT: OnceLock<SharedPawnTable> = OnceLock::new();
 
 pub fn pawn_tt() -> &'static SharedPawnTable {
-    PAWN_TT.get_or_init(|| SharedPawnTable::new(16)) // Default to 16MB
+    PAWN_TT.get_or_init(|| SharedPawnTable::new(64)) // Default to 64 Slight increase.
 }

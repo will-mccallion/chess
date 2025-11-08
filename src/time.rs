@@ -9,6 +9,7 @@ pub struct TimeControl {
 }
 
 impl TimeControl {
+    /// Calculates the optimal and maximum time to think for the current move in milliseconds.
     pub fn allocation_ms(&self, side_white: bool) -> (i64, i64) {
         let (time, inc) = if side_white {
             (self.wtime, self.winc)
@@ -16,16 +17,22 @@ impl TimeControl {
             (self.btime, self.binc)
         };
 
-        let mtg = if self.movestogo > 0 {
-            self.movestogo as i64
-        } else {
-            30
-        };
+        if self.movestogo > 0 {
+            let divisor = (self.movestogo as i64).min(30);
+            let ideal_time = (time / divisor) + (inc * 3 / 4);
+            let safe_time = time - self.move_overhead_ms.max(50);
+            return (ideal_time.min(safe_time), safe_time);
+        }
 
-        let overhead = self.move_overhead_ms.max(5);
-        let soft = (time / (mtg + 7)).max(10) + (inc * 3 / 4);
-        let hard = (soft * 3 / 2).min(time - overhead).max(soft + overhead);
+        let moves_remaining = 40;
+        let ideal_time = (time / moves_remaining) + (inc * 3 / 4);
 
-        (soft.max(5), hard.max(soft + 5))
+        let max_time = time / 5;
+
+        let hard_limit = time - self.move_overhead_ms.max(50);
+
+        let soft_limit = ideal_time.min(max_time).min(hard_limit).max(5); // Think for at least 5ms
+
+        (soft_limit, hard_limit)
     }
 }

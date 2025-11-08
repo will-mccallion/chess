@@ -1,6 +1,7 @@
 use chess::board::Board;
+use chess::nnue;
 use chess::perft::{divide, perft};
-use chess::search::{best_move_timed, extract_pv};
+use chess::search::{best_move_timed, get_pv_from_tt};
 use chess::tt::SharedTransTable;
 use chess::types::{Color, Move, Piece, PieceKind, START_FEN};
 use chess::uci;
@@ -11,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-// Large stacks for deep recursion paths in helpers.
 const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
 
 #[derive(Parser)]
@@ -41,8 +41,8 @@ enum Cmd {
         time: u64,
         #[arg(long, default_value_t = 64)]
         depth: usize,
-        #[arg(long)]
-        threads: Option<usize>,
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
     SelfPlay {
         #[arg(long, default_value_t = 10)]
@@ -60,6 +60,13 @@ enum Cmd {
 }
 
 fn main() {
+    // Initialize the NNUE network.
+    if let Err(e) = nnue::init() {
+        panic!("Failed to load embedded NNUE data: {}", e);
+    }
+
+    println!("NNUE loaded successfully.");
+
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Uci) {
         Cmd::Perft {
@@ -85,13 +92,12 @@ fn main() {
             depth,
             threads,
         } => {
-            let threads_count = threads.unwrap_or_else(num_cpus::get).max(1);
             let fen_str = fen.unwrap_or_else(|| START_FEN.to_string());
             let mut b = Board::from_fen(&fen_str).unwrap_or_else(|e| {
                 eprintln!("FEN parse error: {e}");
                 std::process::exit(1);
             });
-            play_cli(&mut b, time, depth, threads_count);
+            play_cli(&mut b, time, depth, threads);
         }
         Cmd::SelfPlay {
             rounds,
@@ -377,7 +383,7 @@ fn play_cli(b: &mut Board, time_ms: u64, max_depth: usize, threads_count: usize)
             break;
         };
 
-        let pv = extract_pv(b.clone(), &tt, 2);
+        let pv = get_pv_from_tt(b.clone(), &tt, 2);
         ponder_move_opt = pv.get(1).copied();
 
         println!("\n--------------------------------");

@@ -22,7 +22,6 @@ impl Rng {
     }
 }
 
-// Use a thread-safe Mutex for the global RNG
 static BOOK_RNG: OnceLock<Mutex<Rng>> = OnceLock::new();
 fn get_rng() -> &'static Mutex<Rng> {
     BOOK_RNG.get_or_init(|| Mutex::new(Rng::new()))
@@ -38,7 +37,6 @@ pub struct BookEntry {
 }
 
 impl BookEntry {
-    // Polyglot move encoding is different from the engine's.
     fn to_move(self) -> Option<Move> {
         use crate::types::{Move, PieceKind};
 
@@ -136,7 +134,7 @@ static BOOK: OnceLock<Option<OpeningBook>> = OnceLock::new();
 
 fn get_book() -> &'static Option<OpeningBook> {
     BOOK.get_or_init(|| {
-        let book_filename = "book.bin";
+        let book_filename = "moves/book.bin";
         let mut potential_paths: Vec<PathBuf> = Vec::new();
 
         if let Ok(mut exe_path) = std::env::current_exe() {
@@ -148,13 +146,14 @@ fn get_book() -> &'static Option<OpeningBook> {
             potential_paths.push(cwd.join(book_filename));
         }
 
+        potential_paths.push(PathBuf::from("/home/will/projects/chess/moves/book.bin"));
+
         if let Ok(exe_path) = std::env::current_exe()
             && exe_path.to_string_lossy().contains("target")
+            && let Some(target_pos) = exe_path.to_string_lossy().find("target")
         {
-            if let Some(target_pos) = exe_path.to_string_lossy().find("target") {
-                let project_root = PathBuf::from(&exe_path.to_string_lossy()[..target_pos]);
-                potential_paths.push(project_root.join(book_filename));
-            }
+            let project_root = PathBuf::from(&exe_path.to_string_lossy()[..target_pos]);
+            potential_paths.push(project_root.join(book_filename));
         }
 
         for path in potential_paths {

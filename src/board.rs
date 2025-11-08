@@ -1,10 +1,7 @@
 use crate::fen;
 use crate::magics;
 use crate::types::*;
-use crate::zobrist::Zobrist;
-
-const KNIGHT_DELTAS: [i32; 8] = [6, 10, 15, 17, -6, -10, -15, -17];
-const KING_DELTAS: [i32; 8] = [1, -1, 8, -8, 7, 9, -7, -9];
+use crate::zobrist;
 
 #[derive(Clone)]
 pub struct Board {
@@ -20,7 +17,6 @@ pub struct Board {
     pub fullmove_number: i32,
     pub history: Vec<ZKey>,
     pub zobrist: ZKey,
-    pub zob: Zobrist,
 }
 
 impl Board {
@@ -38,18 +34,26 @@ impl Board {
             fullmove_number: 1,
             history: Vec::with_capacity(128),
             zobrist: 0,
-            zob: Zobrist::new(),
         }
     }
 
+    #[inline(always)]
+    pub fn king_square(&self, c: Color) -> u32 {
+        let king_piece = Piece::from_kind(PieceKind::King, c);
+        self.piece_bb[king_piece.index()].trailing_zeros()
+    }
+
+    #[inline]
     pub fn from_fen(fen_str: &str) -> Result<Self, String> {
         fen::parse_fen(fen_str)
     }
 
+    #[inline]
     pub fn place_piece(&mut self, p: Piece, sq: usize) {
         self.piece_on[sq] = p;
     }
 
+    #[inline]
     pub fn rebuild_derived(&mut self) {
         self.piece_bb = [0; 13];
         self.w_pieces = 0;
@@ -70,34 +74,35 @@ impl Board {
         self.all_pieces = self.w_pieces | self.b_pieces;
     }
 
+    #[inline]
     pub fn recompute_zobrist(&mut self) {
         let mut h = 0u64;
 
         for sq in 0..64 {
             let p = self.piece_on[sq];
             if !p.is_empty() {
-                h ^= self.zob.piece_key(p, sq);
+                h ^= zobrist::ZOB.piece_key(p, sq);
             }
         }
 
-        h ^= self.zob.castle[(self.castle & 0xF) as usize];
+        h ^= zobrist::ZOB.castle[(self.castle & 0xF) as usize];
 
         if self.en_passant_sq != NO_SQ {
-            h ^= self.zob.ep_file[(self.en_passant_sq % 8) as usize];
+            h ^= zobrist::ZOB.ep_file[(self.en_passant_sq % 8) as usize];
         }
 
         if self.turn == Color::Black {
-            h ^= self.zob.side;
+            h ^= zobrist::ZOB.side;
         }
 
         self.zobrist = h;
     }
 
+    #[inline]
     pub fn count_repetitions(&self) -> usize {
         let current_key = self.zobrist;
         let mut count = 0;
 
-        // Search history backwards from the second to last state
         for &key in self
             .history
             .iter()
@@ -113,86 +118,58 @@ impl Board {
         count
     }
 
+    #[inline]
     pub fn is_draw_by_repetition(&self) -> bool {
         self.count_repetitions() >= 2
     }
 
+    #[inline]
     pub fn is_square_attacked(&self, square: i32, by: Color) -> bool {
-        let pawn = if by == Color::White {
-            Piece::WP
+        let sq = square as usize;
+        let (pawn, knight, king, bishop_like, rook_like) = if by == Color::White {
+            (
+                Piece::WP,
+                Piece::WN,
+                Piece::WK,
+                self.piece_bb[Piece::WB.index()] | self.piece_bb[Piece::WQ.index()],
+                self.piece_bb[Piece::WR.index()] | self.piece_bb[Piece::WQ.index()],
+            )
         } else {
-            Piece::BP
+            (
+                Piece::BP,
+                Piece::BN,
+                Piece::BK,
+                self.piece_bb[Piece::BB.index()] | self.piece_bb[Piece::BQ.index()],
+                self.piece_bb[Piece::BR.index()] | self.piece_bb[Piece::BQ.index()],
+            )
         };
-        let dir = if by == Color::White { -8 } else { 8 };
-        let f = file_of(square);
 
-        if f > 0 {
-            let s1 = square + dir - 1;
-            if in_board(s1) && self.piece_on[s1 as usize] == pawn {
-                return true;
-            }
-        }
-        if f < 7 {
-            let s2 = square + dir + 1;
-            if in_board(s2) && self.piece_on[s2 as usize] == pawn {
-                return true;
-            }
-        }
-
-        let n = if by == Color::White {
-            Piece::WN
+        let pawn_attacks = if by == Color::White {
+            magics::BLACK_PAWN_ATTACKS[sq]
         } else {
-            Piece::BN
+            magics::WHITE_PAWN_ATTACKS[sq]
         };
-        for d in KNIGHT_DELTAS {
-            let to = square + d;
-            if in_board(to)
-                && (file_of(square) - file_of(to)).abs() <= 2
-                && self.piece_on[to as usize] == n
-            {
-                return true;
-            }
-        }
 
-        let k = if by == Color::White {
-            Piece::WK
-        } else {
-            Piece::BK
-        };
-        for d in KING_DELTAS {
-            let to = square + d;
-            if in_board(to)
-                && (file_of(square) - file_of(to)).abs() <= 1
-                && self.piece_on[to as usize] == k
-            {
-                return true;
-            }
-        }
-
-        let occ = self.all_pieces;
-
-        let rook_like_attackers = if by == Color::White {
-            self.piece_bb[Piece::WR.index()] | self.piece_bb[Piece::WQ.index()]
-        } else {
-            self.piece_bb[Piece::BR.index()] | self.piece_bb[Piece::BQ.index()]
-        };
-        if (magics::get_rook_attacks(square as usize, occ) & rook_like_attackers) != 0 {
+        if (pawn_attacks & self.piece_bb[pawn.index()]) != 0 {
             return true;
         }
-
-        let bishop_like_attackers = if by == Color::White {
-            self.piece_bb[Piece::WB.index()] | self.piece_bb[Piece::WQ.index()]
-        } else {
-            self.piece_bb[Piece::BB.index()] | self.piece_bb[Piece::BQ.index()]
-        };
-        if (magics::get_bishop_attacks(square as usize, occ) & bishop_like_attackers) != 0 {
+        if (magics::knight_attacks_from(sq) & self.piece_bb[knight.index()]) != 0 {
+            return true;
+        }
+        if (magics::king_attacks_from(sq) & self.piece_bb[king.index()]) != 0 {
+            return true;
+        }
+        if (magics::get_bishop_attacks(sq, self.all_pieces) & bishop_like) != 0 {
+            return true;
+        }
+        if (magics::get_rook_attacks(sq, self.all_pieces) & rook_like) != 0 {
             return true;
         }
 
         false
     }
 
-    /// Generates all pseudo-legal moves.
+    #[inline]
     pub fn generate_pseudo_legal_moves(&self, out: &mut Vec<Move>) {
         out.clear();
         self.gen_pawns(out);
@@ -200,7 +177,7 @@ impl Board {
         self.gen_sliders(out);
     }
 
-    /// Generates all fully legal moves.
+    #[inline]
     pub fn generate_legal_moves(&mut self, out: &mut Vec<Move>) {
         let mut pseudo = Vec::with_capacity(128);
         self.generate_pseudo_legal_moves(&mut pseudo);
@@ -346,6 +323,7 @@ impl Board {
         }
     }
 
+    #[inline]
     fn gen_leapers(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
@@ -353,21 +331,13 @@ impl Board {
         let kn = if white { Piece::WN } else { Piece::BN };
         let mut bb = self.piece_bb[kn.index()];
         while bb != 0 {
-            let from = bb.trailing_zeros() as i32;
+            let from = bb.trailing_zeros() as usize;
             bb &= bb - 1;
 
-            for d in KNIGHT_DELTAS {
-                let to = from + d;
-                if !in_board(to) {
-                    continue;
-                }
-                if (file_of(from) - file_of(to)).abs() > 2 {
-                    continue;
-                }
-                if (friendly & (1u64 << to)) != 0 {
-                    continue;
-                }
-
+            let mut att = magics::knight_attacks_from(from) & !friendly;
+            while att != 0 {
+                let to = att.trailing_zeros() as usize;
+                att &= att - 1;
                 let capture = (self.all_pieces & (1u64 << to)) != 0;
                 out.push(Move {
                     from: from as u8,
@@ -388,18 +358,10 @@ impl Board {
             return;
         };
 
-        for d in KING_DELTAS {
-            let to = from + d;
-            if !in_board(to) {
-                continue;
-            }
-            if (file_of(from) - file_of(to)).abs() > 1 {
-                continue;
-            }
-            if (friendly & (1u64 << to)) != 0 {
-                continue;
-            }
-
+        let mut att = magics::king_attacks_from(from as usize) & !friendly;
+        while att != 0 {
+            let to = att.trailing_zeros() as usize;
+            att &= att - 1;
             let capture = (self.all_pieces & (1u64 << to)) != 0;
             out.push(Move {
                 from: from as u8,
@@ -433,6 +395,7 @@ impl Board {
                     promotion: None,
                 });
             }
+
             if (self.castle & WQ_CASTLE) != 0
                 && (self.all_pieces & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
                 && self.piece_on[0] == Piece::WR
@@ -466,6 +429,7 @@ impl Board {
                     promotion: None,
                 });
             }
+
             if (self.castle & BQ_CASTLE) != 0
                 && (self.all_pieces & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
                 && self.piece_on[56] == Piece::BR
@@ -485,6 +449,7 @@ impl Board {
         }
     }
 
+    #[inline]
     fn gen_sliders(&self, out: &mut Vec<Move>) {
         let white = self.turn == Color::White;
         let friendly = if white { self.w_pieces } else { self.b_pieces };
@@ -568,6 +533,7 @@ impl Board {
         }
     }
 
+    #[inline]
     pub fn make_move(&mut self, m: Move) -> Undo {
         let mut undo = Undo {
             captured_piece: Piece::Empty,
@@ -577,7 +543,7 @@ impl Board {
         };
 
         if self.en_passant_sq != NO_SQ {
-            self.zobrist ^= self.zob.ep_file[(self.en_passant_sq % 8) as usize];
+            self.zobrist ^= zobrist::ZOB.ep_file[(self.en_passant_sq % 8) as usize];
         }
         self.en_passant_sq = NO_SQ;
 
@@ -585,7 +551,7 @@ impl Board {
         let to = m.to as usize;
         let moving = self.piece_on[from];
 
-        self.zobrist ^= self.zob.piece_key(moving, from);
+        self.zobrist ^= zobrist::ZOB.piece_key(moving, from);
         self.piece_on[from] = Piece::Empty;
         self.piece_bb[moving.index()] ^= 1u64 << from;
 
@@ -610,7 +576,7 @@ impl Board {
             undo.captured_piece = captured;
 
             if !captured.is_empty() {
-                self.zobrist ^= self.zob.piece_key(captured, cap_sq);
+                self.zobrist ^= zobrist::ZOB.piece_key(captured, cap_sq);
                 self.piece_on[cap_sq] = Piece::Empty;
                 self.piece_bb[captured.index()] ^= 1u64 << cap_sq;
                 match captured.color() {
@@ -625,11 +591,11 @@ impl Board {
             let promoted_piece = Piece::from_kind(pk, self.turn);
             self.piece_on[to] = promoted_piece;
             self.piece_bb[promoted_piece.index()] |= 1u64 << to;
-            self.zobrist ^= self.zob.piece_key(promoted_piece, to);
+            self.zobrist ^= zobrist::ZOB.piece_key(promoted_piece, to);
         } else {
             self.piece_on[to] = moving;
             self.piece_bb[moving.index()] |= 1u64 << to;
-            self.zobrist ^= self.zob.piece_key(moving, to);
+            self.zobrist ^= zobrist::ZOB.piece_key(moving, to);
         }
 
         match moving.color() {
@@ -646,8 +612,8 @@ impl Board {
             };
 
             let rook_piece = self.piece_on[rook_from];
-            self.zobrist ^= self.zob.piece_key(rook_piece, rook_from);
-            self.zobrist ^= self.zob.piece_key(rook_piece, rook_to);
+            self.zobrist ^= zobrist::ZOB.piece_key(rook_piece, rook_from);
+            self.zobrist ^= zobrist::ZOB.piece_key(rook_piece, rook_to);
             self.piece_on[rook_from] = Piece::Empty;
             self.piece_on[rook_to] = rook_piece;
 
@@ -667,7 +633,7 @@ impl Board {
                 from - 8
             };
             self.en_passant_sq = ep as i32;
-            self.zobrist ^= self.zob.ep_file[ep % 8];
+            self.zobrist ^= zobrist::ZOB.ep_file[ep % 8];
         }
 
         if matches!(moving.kind(), Some(PieceKind::Pawn)) || m.capture {
@@ -676,7 +642,7 @@ impl Board {
             self.halfmove_clock += 1;
         }
 
-        self.zobrist ^= self.zob.castle[(self.castle & 0xF) as usize];
+        self.zobrist ^= zobrist::ZOB.castle[(self.castle & 0xF) as usize];
         match moving {
             Piece::WK => self.castle &= !(WK_CASTLE | WQ_CASTLE),
             Piece::BK => self.castle &= !(BK_CASTLE | BQ_CASTLE),
@@ -700,10 +666,10 @@ impl Board {
                 _ => {}
             }
         }
-        self.zobrist ^= self.zob.castle[(self.castle & 0xF) as usize];
+        self.zobrist ^= zobrist::ZOB.castle[(self.castle & 0xF) as usize];
 
         self.all_pieces = self.w_pieces | self.b_pieces;
-        self.zobrist ^= self.zob.side;
+        self.zobrist ^= zobrist::ZOB.side;
         if self.turn == Color::Black {
             self.fullmove_number += 1;
         }
@@ -714,6 +680,7 @@ impl Board {
         undo
     }
 
+    #[inline]
     pub fn unmake_move(&mut self, m: Move, u: Undo) {
         self.history.pop();
         // If history is empty, zobrist should be 0, otherwise pop successfully.
@@ -809,6 +776,7 @@ impl Board {
         self.all_pieces = self.w_pieces | self.b_pieces;
     }
 
+    #[inline]
     pub fn make_null_move(&mut self) -> Undo {
         let undo = Undo {
             captured_piece: Piece::Empty,
@@ -818,18 +786,19 @@ impl Board {
         };
 
         if self.en_passant_sq != NO_SQ {
-            self.zobrist ^= self.zob.ep_file[(self.en_passant_sq % 8) as usize];
+            self.zobrist ^= zobrist::ZOB.ep_file[(self.en_passant_sq % 8) as usize];
             self.en_passant_sq = NO_SQ;
         }
 
         self.turn = self.turn.other();
-        self.zobrist ^= self.zob.side;
+        self.zobrist ^= zobrist::ZOB.side;
         self.halfmove_clock += 1;
         self.history.push(self.zobrist);
 
         undo
     }
 
+    #[inline]
     pub fn unmake_null_move(&mut self, u: Undo) {
         self.history.pop();
         self.zobrist = *self.history.last().unwrap_or(&0);
@@ -838,6 +807,7 @@ impl Board {
         self.halfmove_clock = u.old_halfmove_clock;
     }
 
+    #[inline]
     pub fn to_fen(&self) -> String {
         fen::to_fen(self)
     }

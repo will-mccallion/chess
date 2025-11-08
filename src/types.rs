@@ -14,7 +14,7 @@ pub enum Color {
 }
 
 impl Color {
-    #[inline(always)] // Inlined for performance
+    #[inline(always)]
     pub fn other(self) -> Color {
         if self == Color::White {
             Color::Black

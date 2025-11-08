@@ -1,57 +1,7 @@
 use crate::types::Bitboard;
-use std::path::Path;
-use std::sync::OnceLock;
 
-fn run_generator() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static IS_GENERATING: AtomicBool = AtomicBool::new(false);
-
-    if IS_GENERATING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        println!("Magic bitboard attack files not found in 'moves/' directory.");
-        println!("Generating them now. This is a one-time process and may take a few minutes...");
-
-        crate::magic_finder::generate_magics_code();
-
-        println!("Generation complete. The application will now continue.");
-        IS_GENERATING.store(false, Ordering::SeqCst);
-    } else {
-        while IS_GENERATING.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
-}
-
-fn load_table(path_str: &str) -> &'static [Bitboard] {
-    let path = Path::new(path_str);
-    if !path.exists() {
-        run_generator();
-    }
-
-    let bytes = std::fs::read(path)
-        .unwrap_or_else(|e| panic!("Failed to read magic file {}: {}", path_str, e));
-
-    let leaked_bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-
-    unsafe {
-        let ptr = leaked_bytes.as_ptr() as *const Bitboard;
-        let len = leaked_bytes.len() / std::mem::size_of::<Bitboard>();
-        std::slice::from_raw_parts(ptr, len)
-    }
-}
-
-static ROOK_ATTACKS: OnceLock<&'static [Bitboard]> = OnceLock::new();
-static BISHOP_ATTACKS: OnceLock<&'static [Bitboard]> = OnceLock::new();
-
-fn get_rook_table() -> &'static [Bitboard] {
-    ROOK_ATTACKS.get_or_init(|| load_table("moves/rook_attacks.bin"))
-}
-
-fn get_bishop_table() -> &'static [Bitboard] {
-    BISHOP_ATTACKS.get_or_init(|| load_table("moves/bishop_attacks.bin"))
-}
+// Includes all generated tables: PAWN, KNIGHT, KING, ROOK, BISHOP
+include!(concat!(env!("OUT_DIR"), "/generated_attacks.rs"));
 
 struct Magic {
     mask: Bitboard,
@@ -839,8 +789,7 @@ pub fn get_rook_attacks(sq: usize, occupied: Bitboard) -> Bitboard {
     let magic = &ROOK_MAGICS[sq];
     let blockers = occupied & magic.mask;
     let index = (blockers.wrapping_mul(magic.magic) >> magic.shift) as usize;
-
-    get_rook_table()[magic.offset + index]
+    ROOK_ATTACKS[magic.offset + index]
 }
 
 #[inline(always)]
@@ -848,51 +797,15 @@ pub fn get_bishop_attacks(sq: usize, occupied: Bitboard) -> Bitboard {
     let magic = &BISHOP_MAGICS[sq];
     let blockers = occupied & magic.mask;
     let index = (blockers.wrapping_mul(magic.magic) >> magic.shift) as usize;
-
-    get_bishop_table()[magic.offset + index]
-}
-
-#[inline(always)]
-fn between(a: isize, lo: isize, hi: isize) -> bool {
-    a >= lo && a <= hi
+    BISHOP_ATTACKS[magic.offset + index]
 }
 
 #[inline(always)]
 pub fn knight_attacks_from(sq: usize) -> Bitboard {
-    const DELTAS: [isize; 8] = [17, 15, 10, 6, -6, -10, -15, -17];
-    let f = (sq & 7) as isize;
-    let mut bb = 0u64;
-    for &d in &DELTAS {
-        let ns = sq as isize + d;
-        if between(ns, 0, 63) {
-            let nf = ns & 7;
-            if (nf - f).abs() <= 2 {
-                bb |= 1u64 << ns;
-            }
-        }
-    }
-
-    bb
+    KNIGHT_ATTACKS[sq]
 }
 
 #[inline(always)]
 pub fn king_attacks_from(sq: usize) -> Bitboard {
-    let f = (sq & 7) as isize;
-    let r = (sq >> 3) as isize;
-    let mut bb = 0u64;
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            if df == 0 && dr == 0 {
-                continue;
-            }
-            let nf = f + df;
-            let nr = r + dr;
-
-            if between(nf, 0, 7) && between(nr, 0, 7) {
-                bb |= 1u64 << ((nr * 8 + nf) as usize);
-            }
-        }
-    }
-
-    bb
+    KING_ATTACKS[sq]
 }

@@ -29,7 +29,7 @@ pub struct TTEntry {
     data: u64,
 }
 
-// Bitfield layout for the 64-bit data field:
+// Bitfield layout for the 64-bit data field
 const SCORE_SHIFT: u64 = 0;
 const MOVE_SHIFT: u64 = 16;
 const DEPTH_SHIFT: u64 = 32;
@@ -133,6 +133,7 @@ impl TransTable {
         (key as usize) & self.mask
     }
 
+    #[inline]
     fn clear(&mut self) {
         self.slots
             .iter_mut()
@@ -140,6 +141,7 @@ impl TransTable {
         self.tick_age();
     }
 
+    #[inline]
     fn probe(&self, key: ZKey) -> Option<TTEntry> {
         let cluster = &self.slots[self.idx(key)];
         for entry in &cluster.entries {
@@ -150,6 +152,7 @@ impl TransTable {
         None
     }
 
+    #[inline]
     fn store(&mut self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
         let i = self.idx(key);
         let cluster = &mut self.slots[i];
@@ -183,6 +186,7 @@ impl TransTable {
         cluster.entries[replace_idx] = new_entry;
     }
 
+    #[inline]
     fn stats(&self) -> (usize, usize) {
         let filled = self
             .slots
@@ -246,26 +250,34 @@ impl SharedTransTable {
         &self.shards[idx]
     }
 
+    #[inline]
     pub fn probe(&self, key: ZKey) -> Option<TTEntry> {
         self.shard_for(key).lock().unwrap().probe(key)
     }
+
+    #[inline]
     pub fn store(&self, key: ZKey, depth: i16, score: i32, bound: Bound, best_move: Option<Move>) {
         self.shard_for(key)
             .lock()
             .unwrap()
             .store(key, depth, score, bound, best_move);
     }
+
+    #[inline]
     pub fn clear(&self) {
         for shard in &self.shards {
             shard.lock().unwrap().clear();
         }
     }
+
+    #[inline]
     pub fn tick_age(&self) {
         for shard in &self.shards {
             shard.lock().unwrap().tick_age();
         }
     }
 
+    #[inline]
     pub fn hashfull_permill(&self) -> u32 {
         let (filled_total, slots_total) = self
             .shards

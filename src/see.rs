@@ -1,4 +1,5 @@
 use crate::board::Board;
+use crate::magics;
 use crate::types::{Move, Piece, PieceKind};
 
 const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000]; // P, N, B, R, Q, K
@@ -12,67 +13,88 @@ fn val(p: Piece) -> i32 {
     }
 }
 
-fn attackers_to(b: &Board, sq: usize, occupied: u64, color: crate::types::Color) -> u64 {
-    let s = sq as i32;
-    let mut attackers = 0;
-
-    let pawn = Piece::from_kind(PieceKind::Pawn, color);
-    let pawn_bb = b.piece_bb[pawn.index()];
-
-    if color == crate::types::Color::White {
-        if s % 8 != 0 && s > 8 {
-            attackers |= (1u64 << (s - 9)) & pawn_bb;
-        }
-        if s % 8 != 7 && s > 8 {
-            attackers |= (1u64 << (s - 7)) & pawn_bb;
-        }
-    } else {
-        if s % 8 != 0 && s < 56 {
-            attackers |= (1u64 << (s + 7)) & pawn_bb;
-        }
-        if s % 8 != 7 && s < 56 {
-            attackers |= (1u64 << (s + 9)) & pawn_bb;
-        }
-    };
-
-    attackers |= crate::magics::knight_attacks_from(sq)
-        & b.piece_bb[Piece::from_kind(PieceKind::Knight, color).index()];
-
-    attackers |= crate::magics::king_attacks_from(sq)
-        & b.piece_bb[Piece::from_kind(PieceKind::King, color).index()];
-
-    attackers |= crate::magics::get_bishop_attacks(sq, occupied)
-        & (b.piece_bb[Piece::from_kind(PieceKind::Bishop, color).index()]
-            | b.piece_bb[Piece::from_kind(PieceKind::Queen, color).index()]);
-
-    attackers |= crate::magics::get_rook_attacks(sq, occupied)
-        & (b.piece_bb[Piece::from_kind(PieceKind::Rook, color).index()]
-            | b.piece_bb[Piece::from_kind(PieceKind::Queen, color).index()]);
-
-    attackers
-}
-
-fn least_valuable_attacker(
+fn get_attackers(
     b: &Board,
-    attackers: u64,
+    sq: usize,
+    occupied: u64,
     side: crate::types::Color,
-) -> Option<(Piece, usize)> {
-    for kind in [
-        PieceKind::Pawn,
-        PieceKind::Knight,
-        PieceKind::Bishop,
-        PieceKind::Rook,
-        PieceKind::Queen,
-        PieceKind::King,
-    ] {
-        let piece = Piece::from_kind(kind, side);
-        let subset = b.piece_bb[piece.index()] & attackers;
-        if subset != 0 {
-            return Some((piece, subset.trailing_zeros() as usize));
-        }
+) -> (u64, Option<(Piece, usize)>) {
+    let mut attackers = 0u64;
+
+    let pawn_kind = Piece::from_kind(PieceKind::Pawn, side);
+    let pawn_attacks = if side == crate::types::Color::White {
+        magics::BLACK_PAWN_ATTACKS[sq]
+    } else {
+        magics::WHITE_PAWN_ATTACKS[sq]
+    };
+    let pawns = b.piece_bb[pawn_kind.index()] & occupied;
+    let mut current_attackers = pawn_attacks & pawns;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((pawn_kind, current_attackers.trailing_zeros() as usize)),
+        );
     }
 
-    None
+    let knight_kind = Piece::from_kind(PieceKind::Knight, side);
+    let knights = b.piece_bb[knight_kind.index()] & occupied;
+    current_attackers = magics::knight_attacks_from(sq) & knights;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((knight_kind, current_attackers.trailing_zeros() as usize)),
+        );
+    }
+
+    let bishop_kind = Piece::from_kind(PieceKind::Bishop, side);
+    let bishop_attacks = magics::get_bishop_attacks(sq, occupied);
+    let bishops = b.piece_bb[bishop_kind.index()] & occupied;
+    current_attackers = bishop_attacks & bishops;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((bishop_kind, current_attackers.trailing_zeros() as usize)),
+        );
+    }
+
+    let rook_kind = Piece::from_kind(PieceKind::Rook, side);
+    let rook_attacks = magics::get_rook_attacks(sq, occupied);
+    let rooks = b.piece_bb[rook_kind.index()] & occupied;
+    current_attackers = rook_attacks & rooks;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((rook_kind, current_attackers.trailing_zeros() as usize)),
+        );
+    }
+
+    let queen_kind = Piece::from_kind(PieceKind::Queen, side);
+    let queens = b.piece_bb[queen_kind.index()] & occupied;
+    current_attackers = (bishop_attacks | rook_attacks) & queens;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((queen_kind, current_attackers.trailing_zeros() as usize)),
+        );
+    }
+
+    let king_kind = Piece::from_kind(PieceKind::King, side);
+    let kings = b.piece_bb[king_kind.index()] & occupied;
+    current_attackers = magics::king_attacks_from(sq) & kings;
+    if current_attackers != 0 {
+        attackers |= current_attackers;
+        return (
+            attackers,
+            Some((king_kind, current_attackers.trailing_zeros() as usize)),
+        );
+    }
+
+    (attackers, None)
 }
 
 pub fn see(b: &Board, mov: Move) -> i32 {
@@ -84,7 +106,7 @@ pub fn see(b: &Board, mov: Move) -> i32 {
     let to_sq = mov.to as usize;
 
     let mut gain = [0; 32];
-    let mut gain_idx = 0;
+    let mut gain_idx = 1;
 
     let mut from_piece = b.piece_on[from_sq];
     let mut occupied = b.all_pieces;
@@ -96,22 +118,16 @@ pub fn see(b: &Board, mov: Move) -> i32 {
         b.piece_on[to_sq]
     };
 
-    gain[gain_idx] = val(captured_piece);
-    gain_idx += 1;
+    gain[0] = val(captured_piece);
 
     occupied ^= 1u64 << from_sq;
 
     loop {
         current_turn = current_turn.other();
 
-        let attackers = attackers_to(b, to_sq, occupied, current_turn);
-        if attackers == 0 {
-            break;
-        }
+        let (_, lva) = get_attackers(b, to_sq, occupied, current_turn);
 
-        if let Some((attacker_piece, attacker_sq)) =
-            least_valuable_attacker(b, attackers, current_turn)
-        {
+        if let Some((attacker_piece, attacker_sq)) = lva {
             occupied ^= 1u64 << attacker_sq;
 
             if gain_idx >= 32 {
