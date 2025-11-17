@@ -152,11 +152,10 @@ fn get_book() -> &'static Option<OpeningBook> {
 
         if let Ok(exe_path) = std::env::current_exe()
             && exe_path.to_string_lossy().contains("target")
+            && let Some(target_pos) = exe_path.to_string_lossy().find("target")
         {
-            if let Some(target_pos) = exe_path.to_string_lossy().find("target") {
-                let project_root = PathBuf::from(&exe_path.to_string_lossy()[..target_pos]);
-                potential_paths.push(project_root.join(book_filename));
-            }
+            let project_root = PathBuf::from(&exe_path.to_string_lossy()[..target_pos]);
+            potential_paths.push(project_root.join(book_filename));
         }
 
         for path in potential_paths {

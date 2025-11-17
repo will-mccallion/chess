@@ -4,13 +4,11 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use once_cell::sync::OnceCell;
 use std::error::Error;
 use std::fmt;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Cursor, Read, Seek};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-// --- Constants ---
 const FEATURE_TRANSFORMER_HALF_DIMENSIONS: usize = 256;
 const SQUARE_NB: usize = 64;
 const FT_INPUT_DIM: usize = 41024;
@@ -18,7 +16,6 @@ const HL1_INPUT_DIM: usize = 512;
 const HL1_OUTPUT_DIM: usize = 32;
 const HL2_OUTPUT_DIM: usize = 32;
 
-// --- Model Definition ---
 pub struct Model {
     ft_weights: Vec<i16>,
     ft_biases: Vec<i16>,
@@ -32,7 +29,6 @@ pub struct Model {
 
 static MODEL: OnceCell<Model> = OnceCell::new();
 
-// --- Error Handling ---
 #[derive(Debug)]
 pub enum NnueError {
     IoError(std::io::Error),
@@ -66,10 +62,9 @@ impl From<std::io::Error> for NnueError {
 }
 
 /// Initializes the NNUE model from the given file path.
-/// This must be called once at engine startup.
-pub fn init(nnue_path: &str) -> Result<(), NnueError> {
-    let file = File::open(nnue_path)?;
-    let mut reader = BufReader::new(file);
+pub fn init() -> Result<(), NnueError> {
+    const NNUE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nn-9931db908a9b.nnue"));
+    let mut reader = BufReader::new(Cursor::new(NNUE_BYTES));
 
     // Read headers and metadata
     let _version = reader.read_u32::<LittleEndian>()?;
@@ -86,6 +81,7 @@ pub fn init(nnue_path: &str) -> Result<(), NnueError> {
             "Feature transformer header does not match expected hash!".to_string(),
         ));
     }
+
     let mut ft_biases = vec![0i16; FEATURE_TRANSFORMER_HALF_DIMENSIONS];
     reader.read_i16_into::<LittleEndian>(&mut ft_biases)?;
     let ft_weights_count = FEATURE_TRANSFORMER_HALF_DIMENSIONS * FT_INPUT_DIM;
@@ -113,7 +109,7 @@ pub fn init(nnue_path: &str) -> Result<(), NnueError> {
     reader.read_i8_into(&mut out_weights)?;
 
     let current_pos = reader.stream_position()?;
-    let end_pos = reader.get_ref().metadata()?.len();
+    let end_pos = reader.get_ref().get_ref().len() as u64;
     if end_pos - current_pos != 0 {
         return Err(NnueError::ValueError(
             "Did not read all parameters from NNUE file!".to_string(),
@@ -138,7 +134,6 @@ pub fn init(nnue_path: &str) -> Result<(), NnueError> {
 }
 
 /// Evaluates the board position using the loaded NNUE model.
-/// Panics if the model is not initialized.
 pub fn evaluate(board: &Board) -> i32 {
     let model = MODEL
         .get()
@@ -147,14 +142,17 @@ pub fn evaluate(board: &Board) -> i32 {
     let is_white_turn = board.turn == Color::White;
 
     // Get features from both points of view
-    let features_us = get_halfkp_indices(board, is_white_turn);
-    let features_them = get_halfkp_indices(board, !is_white_turn);
+    let (indices_us_array, count_us) = get_halfkp_indices(board, is_white_turn);
+    let (indices_them_array, count_them) = get_halfkp_indices(board, !is_white_turn);
+
+    let features_us = &indices_us_array[..count_us];
+    let features_them = &indices_them_array[..count_them];
 
     // Apply feature transformer
     let ft_us =
-        unsafe { feature_transformer_simd(&features_us, &model.ft_weights, &model.ft_biases) };
+        unsafe { feature_transformer_simd(features_us, &model.ft_weights, &model.ft_biases) };
     let ft_them =
-        unsafe { feature_transformer_simd(&features_them, &model.ft_weights, &model.ft_biases) };
+        unsafe { feature_transformer_simd(features_them, &model.ft_weights, &model.ft_biases) };
 
     // Concatenate features for the first dense layer
     let mut concat_features = [0i32; HL1_INPUT_DIM];
@@ -184,8 +182,9 @@ pub fn evaluate(board: &Board) -> i32 {
 
 /// Generates the list of active feature indices for one side.
 #[inline]
-fn get_halfkp_indices(board: &Board, is_white_pov: bool) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(32);
+fn get_halfkp_indices(board: &Board, is_white_pov: bool) -> ([usize; 32], usize) {
+    let mut indices_array = [0; 32];
+    let mut count = 0;
 
     let us = if is_white_pov {
         Color::White
@@ -203,9 +202,14 @@ fn get_halfkp_indices(board: &Board, is_white_pov: bool) -> Vec<usize> {
 
         let piece_color = piece.color().unwrap();
         let idx = make_halfkp_index(is_white_pov, king_oriented, sq, piece, piece_color);
-        indices.push(idx);
+
+        if count < 32 {
+            indices_array[count] = idx;
+            count += 1;
+        }
     }
-    indices
+
+    (indices_array, count)
 }
 
 #[inline]
@@ -218,7 +222,6 @@ fn make_halfkp_index(
 ) -> usize {
     let oriented_sq = orient(is_white_pov, sq);
     let piece_idx = piece_square_from_piece(piece.kind().unwrap(), piece_color, is_white_pov);
-    // CORRECTED: The king stride must be 641 for this network architecture.
     oriented_sq + piece_idx + 641 * king_oriented
 }
 
@@ -228,12 +231,10 @@ fn orient(is_white_pov: bool, sq: usize) -> usize {
 }
 
 /// This function maps a piece to its base index in the feature vector.
-/// The logic here is equivalent to the original file's match statement.
 #[inline]
 fn piece_square_from_piece(piece_kind: PieceKind, piece_color: Color, is_white_pov: bool) -> usize {
-    // Is the piece's color the same as the side we are evaluating for?
     let color_is_pov = (piece_color == Color::White) == is_white_pov;
-    let color_offset = if color_is_pov { 0 } else { 1 }; // 0 for our pieces, 1 for their pieces
+    let color_offset = if color_is_pov { 0 } else { 1 };
 
     let piece_offset = match piece_kind {
         PieceKind::Pawn => 0,
@@ -241,10 +242,9 @@ fn piece_square_from_piece(piece_kind: PieceKind, piece_color: Color, is_white_p
         PieceKind::Bishop => 2,
         PieceKind::Rook => 3,
         PieceKind::Queen => 4,
-        PieceKind::King => 5, // This case is filtered out, but included for completeness
+        PieceKind::King => 5,
     };
 
-    // The features are interleaved: OurPawn, TheirPawn, OurKnight, TheirKnight, etc.
     (piece_offset * 2 + color_offset) * SQUARE_NB + 1
 }
 

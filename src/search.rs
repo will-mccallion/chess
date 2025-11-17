@@ -8,37 +8,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-// --- Constants ---
-
 pub const MATE_SCORE: i32 = 30_000;
 const MATE_THRESHOLD: i32 = MATE_SCORE - 512;
 const MAX_PLY: usize = 128;
 const DRAW_SCORE: i32 = 0;
 
-// Futility pruning margins. Indexed by remaining depth.
 const FUTILITY_MARGIN: [i32; 8] = [0, 125, 250, 450, 700, 950, 1200, 1500];
-
-// Late Move Pruning (LMP) thresholds for quiet moves (indexed by depth 1..=3).
-// For depth d, after LMP_LIMITS[d] quiet moves have been searched, later quiet moves are pruned.
-const LMP_LIMITS: [i32; 4] = [0, 3, 5, 8]; // index 0 unused, depths 1..3
-
-// History-based leaf pruning: prune very bad quiet moves at shallow depth.
+const LMP_LIMITS: [i32; 4] = [0, 3, 5, 8];
 const HISTORY_PRUNE_THRESHOLD: i32 = 4000;
-
-// Minimum depth at which to apply Internal Iterative Deepening (IID) on PV nodes with no TT move.
 const IID_MIN_DEPTH: i32 = 5;
 
-// --- Move Ordering Scores ---
 const TT_MOVE_SCORE: i32 = 2_000_000_000;
 const GOOD_CAPTURE_SCORE: i32 = 1_900_000_000;
 const KILLER_1_SCORE: i32 = 1_800_000_000;
 const KILLER_2_SCORE: i32 = 1_700_000_000;
 const COUNTERMOVE_SCORE: i32 = 1_650_000_000;
-const QUIET_MOVE_SCORE: i32 = 1_600_000_000; // Base for history heuristic
+const QUIET_MOVE_SCORE: i32 = 1_600_000_000;
 const BAD_CAPTURE_SCORE: i32 = -1_900_000_000;
 const HISTORY_MAX: i32 = 16_384;
-
-// --- Search Structures ---
 
 struct SearchController {
     start_time: Instant,
@@ -49,15 +36,13 @@ struct SearchController {
 }
 
 impl SearchController {
-    /// Checks if the allocated time for the search is up.
-    /// This check is performed periodically to avoid performance overhead.
     fn time_is_up(&mut self) -> bool {
-        // Only the main thread checks the time to reduce overhead in lazy SMP.
-        if self.is_main_thread && (self.nodes & 4095) == 0 {
-            if self.start_time.elapsed() >= self.time_budget {
-                self.stop_signal.store(true, Ordering::Relaxed);
-                return true;
-            }
+        if self.is_main_thread
+            && (self.nodes & 4095) == 0
+            && self.start_time.elapsed() >= self.time_budget
+        {
+            self.stop_signal.store(true, Ordering::Relaxed);
+            return true;
         }
         self.stop_signal.load(Ordering::Relaxed)
     }
@@ -67,26 +52,21 @@ pub struct Search<'a> {
     board: Board,
     tt: &'a SharedTransTable,
     controller: SearchController,
-    // Heuristics for move ordering
     killers: [[Option<Move>; 2]; MAX_PLY],
     history: [[i32; 64]; 13],                     // [piece][to_square]
     counter_moves: [[[Option<Move>; 64]; 13]; 2], // [is_capture][piece][to_square]
-    // Search state
     ply: usize,
     seldepth: usize,
-    prev_move: [Option<Move>; MAX_PLY], // Stores the move leading to the current ply
+    prev_move: [Option<Move>; MAX_PLY],
 }
 
-// --- Move Scoring ---
-
 /// Assigns a score to a move to guide the search algorithm.
-/// Better moves (likely to be the best) are given higher scores.
 fn score_move(s: &Search, m: Move, tt_move: Option<Move>) -> i32 {
     if Some(m) == tt_move {
         return TT_MOVE_SCORE;
     }
+
     if m.capture {
-        // Use Static Exchange Evaluation (SEE) to score captures
         let see_val = see(&s.board, m);
         return if see_val >= 0 {
             GOOD_CAPTURE_SCORE + see_val
@@ -94,13 +74,15 @@ fn score_move(s: &Search, m: Move, tt_move: Option<Move>) -> i32 {
             BAD_CAPTURE_SCORE + see_val
         };
     }
-    // Quiet moves are scored using killer and countermove heuristics, then history.
+
     if Some(m) == s.killers[s.ply][0] {
         return KILLER_1_SCORE;
     }
+
     if Some(m) == s.killers[s.ply][1] {
         return KILLER_2_SCORE;
     }
+
     if let Some(prev_m) = s.prev_move[s.ply.saturating_sub(1)] {
         let piece_idx = s.board.piece_on[prev_m.from as usize].index();
         if Some(m) == s.counter_moves[prev_m.capture as usize][piece_idx][prev_m.to as usize] {
@@ -112,10 +94,7 @@ fn score_move(s: &Search, m: Move, tt_move: Option<Move>) -> i32 {
     QUIET_MOVE_SCORE + s.history[piece_idx][m.to as usize]
 }
 
-// --- Quiescence Search ---
-
-/// A specialized search that only considers tactical moves (captures and checks)
-/// to ensure the static evaluation is not based on an unstable position.
+/// A specialized search that only considers tactical moves
 fn quiesce(s: &mut Search, mut alpha: i32, beta: i32) -> i32 {
     s.seldepth = s.seldepth.max(s.ply);
     s.controller.nodes += 1;
@@ -128,7 +107,6 @@ fn quiesce(s: &mut Search, mut alpha: i32, beta: i32) -> i32 {
         .trailing_zeros() as i32;
     let in_check = s.board.is_square_attacked(king_sq, s.board.turn.other());
 
-    // In non-check positions, the "stand-pat" score can be used as a lower bound.
     if !in_check {
         let stand_pat = evaluate(&s.board);
         if stand_pat >= beta {
@@ -144,7 +122,6 @@ fn quiesce(s: &mut Search, mut alpha: i32, beta: i32) -> i32 {
 
     let mut scored_moves: Vec<(Move, i32)> = pseudo_moves
         .into_iter()
-        // In quiescence, only evaluate captures, promotions, and checking moves.
         .filter(|&m| m.capture || m.promotion.is_some() || in_check)
         .map(|m| (m, score_move(s, m, None)))
         .collect();
@@ -153,7 +130,6 @@ fn quiesce(s: &mut Search, mut alpha: i32, beta: i32) -> i32 {
 
     let mut legal_moves_found = false;
     for (m, _) in &scored_moves {
-        // Prune losing captures using SEE, unless in check.
         if !in_check && m.capture && see(&s.board, *m) < 0 {
             continue;
         }
@@ -185,23 +161,21 @@ fn quiesce(s: &mut Search, mut alpha: i32, beta: i32) -> i32 {
     }
 
     if in_check && !legal_moves_found {
-        return -MATE_SCORE + s.ply as i32; // Checkmate
+        return -MATE_SCORE + s.ply as i32;
     }
     alpha
 }
-
-// --- Main Search (Negamax) ---
 
 fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
     s.seldepth = s.seldepth.max(s.ply);
     if s.controller.time_is_up() {
         return 0;
     }
-    // Check for draws by repetition or the 50-move rule.
+
     if s.ply > 0 && (s.board.is_draw_by_repetition() || s.board.halfmove_clock >= 100) {
         return DRAW_SCORE;
     }
-    // Prevent stack overflow.
+
     if s.ply >= MAX_PLY - 1 {
         return evaluate(&s.board);
     }
@@ -211,7 +185,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
     let key = s.board.zobrist;
     let mut tt_move: Option<Move> = None;
 
-    // --- Transposition Table Probe ---
     if let Some(entry) = s.tt.probe(key) {
         if entry.depth() >= depth as i16 && s.ply > 0 {
             let mut score = entry.score();
@@ -237,7 +210,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         .trailing_zeros() as i32;
     let in_check = s.board.is_square_attacked(king_sq, s.board.turn.other());
 
-    // Check extensions: increase depth if in check.
     if in_check {
         depth += 1;
     }
@@ -247,9 +219,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
 
     s.controller.nodes += 1;
 
-    // --- Internal Iterative Deepening (IID) ---
-    // If this is a PV node, depth is sufficiently large, and we have no TT move,
-    // do a reduced-depth search to find a good move and put it into the TT.
     if is_pv && depth >= IID_MIN_DEPTH && tt_move.is_none() && !s.controller.time_is_up() {
         let _ = negamax(s, alpha, beta, depth - 2);
         if let Some(entry) = s.tt.probe(key) {
@@ -257,9 +226,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         }
     }
 
-    // --- Pruning Techniques ---
-
-    // Futility Pruning: If static eval is way above beta, we assume this node will fail high.
     if !is_pv && !in_check && depth < 8 {
         let eval = evaluate(&s.board);
         if eval - FUTILITY_MARGIN[depth as usize] >= beta {
@@ -267,8 +233,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         }
     }
 
-    // Null Move Pruning (NMP): Give the opponent an extra turn. If the score is still high,
-    // it suggests our position is very strong, and we can prune this branch.
     let our_pieces = if s.board.turn == crate::types::Color::White {
         s.board.w_pieces
     } else {
@@ -288,7 +252,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         s.ply -= 1;
         s.board.unmake_null_move(undo);
         if null_score >= beta {
-            // Add verification search for added stability
             if depth < 10 {
                 return beta;
             }
@@ -299,7 +262,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         }
     }
 
-    // --- Move Generation and Ordering ---
     let mut pseudo_moves = Vec::with_capacity(128);
     s.board.generate_pseudo_legal_moves(&mut pseudo_moves);
 
@@ -314,9 +276,7 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
     let mut best_move: Option<Move> = None;
     let mut moves_searched = 0;
 
-    // --- Iterating Through Moves ---
     for (m, _) in &scored_moves {
-        // Late Move Pruning (LMP) for quiet moves at shallow depth.
         if !is_pv && !in_check && depth <= 3 && !m.capture && m.promotion.is_none() {
             let lmp_limit = LMP_LIMITS[depth as usize];
             if moves_searched as i32 >= lmp_limit {
@@ -324,8 +284,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
             }
         }
 
-        // History-based leaf pruning at very shallow depth:
-        // prune quiet moves with very bad history scores when depth is small.
         if depth <= 2 && !in_check && !m.capture && m.promotion.is_none() {
             let piece_idx = s.board.piece_on[m.from as usize].index();
             let hist_score = s.history[piece_idx][m.to as usize];
@@ -349,41 +307,33 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         s.prev_move[s.ply] = Some(*m);
         moves_searched += 1;
 
-        // --- Search Reductions and PVS ---
-
         let score;
         if moves_searched == 1 {
-            // First move is searched with a full window (Principal Variation Search)
             score = -negamax(s, -beta, -alpha, depth - 1);
         } else {
-            // SEE Pruning on late moves: Prune obviously bad captures.
             if depth < 8 && !in_check && m.capture && see(&s.board, *m) < 0 {
                 s.ply -= 1;
                 s.board.unmake_move(*m, undo);
                 continue;
             }
 
-            // Late Move Reductions (LMR): Search subsequent moves with reduced depth.
             let mut reduction = 0;
             if depth >= 3 && !m.capture && !in_check {
-                // More dynamic LMR formula
                 let d = depth as f32;
                 let mn = moves_searched as f32;
                 reduction = (0.5 + d.ln() * mn.ln() / 2.0) as i32;
                 if !is_pv {
                     reduction += 1;
                 }
-                // Reduce less for moves with good history
+
                 let history_score =
                     s.history[s.board.piece_on[m.from as usize].index()][m.to as usize];
                 reduction -= history_score / 4096;
                 reduction = reduction.clamp(0, depth - 2);
             }
 
-            // Search with a null window (expecting the move to fail low)
             let mut search_score = -negamax(s, -alpha - 1, -alpha, depth - 1 - reduction);
 
-            // If the null window search fails high, it needs to be re-searched with a full window.
             if search_score > alpha && reduction > 0 {
                 search_score = -negamax(s, -alpha - 1, -alpha, depth - 1);
             }
@@ -406,27 +356,22 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
             if score > alpha {
                 alpha = score;
                 if alpha >= beta {
-                    // This move caused a beta cutoff (fail-high).
-                    // Update heuristics to prioritize this kind of move in the future.
                     if !m.capture {
-                        // Store as a killer move
                         if Some(*m) != s.killers[s.ply][0] {
                             s.killers[s.ply][1] = s.killers[s.ply][0];
                             s.killers[s.ply][0] = Some(*m);
                         }
-                        // Store as a countermove
+
                         if let Some(prev_m) = s.prev_move[s.ply.saturating_sub(1)] {
                             let piece_idx = s.board.piece_on[prev_m.from as usize].index();
                             s.counter_moves[prev_m.capture as usize][piece_idx]
                                 [prev_m.to as usize] = Some(*m);
                         }
 
-                        // Increase history score for the successful quiet move
                         let piece_idx = s.board.piece_on[m.from as usize].index();
                         let bonus = (depth * depth).min(1000);
                         s.history[piece_idx][m.to as usize] += bonus;
 
-                        // Decay history scores to prevent overflow and prioritize recent information
                         if s.history[piece_idx][m.to as usize] > HISTORY_MAX {
                             for p in 1..13 {
                                 for sq in 0..64 {
@@ -435,7 +380,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
                             }
                         }
 
-                        // Apply a penalty (malus) to the moves that were tried before this one and failed.
                         for (failed_move, _) in scored_moves.iter().take(moves_searched - 1) {
                             if !failed_move.capture {
                                 let p_idx = s.board.piece_on[failed_move.from as usize].index();
@@ -457,7 +401,6 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
         };
     }
 
-    // --- Store Result in Transposition Table ---
     let bound = if best_score <= alpha_orig {
         Bound::Upper
     } else if best_score >= beta {
@@ -479,8 +422,7 @@ fn negamax(s: &mut Search, mut alpha: i32, beta: i32, mut depth: i32) -> i32 {
     best_score
 }
 
-// --- Utility and Main Search Function ---
-
+#[inline]
 pub fn get_pv_from_tt(mut pos: Board, tt: &SharedTransTable, max_len: usize) -> Vec<Move> {
     let mut pv = Vec::with_capacity(max_len);
     for _ in 0..max_len {
@@ -528,10 +470,8 @@ pub fn best_move_timed(
     let mut best_move: Option<Move> = None;
     let mut score = 0;
 
-    // Iterative deepening loop
     for d in 1..=max_depth {
         search.seldepth = 0;
-        // Aspiration window: search with a narrow window around the previous score.
         let (mut alpha, mut beta) = if d > 3 {
             (score - 40, score + 40)
         } else {
@@ -539,12 +479,11 @@ pub fn best_move_timed(
         };
 
         loop {
-            // Loop for re-searching if aspiration window fails
             score = negamax(&mut search, alpha, beta, d as i32);
             if search.controller.time_is_up() {
                 break;
             }
-            // If the search fails low or high, re-search with a wider window.
+
             if score <= alpha {
                 alpha = -MATE_SCORE;
             } else if score >= beta {
@@ -557,11 +496,11 @@ pub fn best_move_timed(
         if search.controller.time_is_up() {
             break;
         }
+
         if let Some(entry) = search.tt.probe(search.board.zobrist) {
             best_move = entry.best_move();
         }
 
-        // Print UCI info
         if is_main_thread {
             let elapsed_ms = search.controller.start_time.elapsed().as_millis();
             let nps = if elapsed_ms > 0 {
@@ -569,6 +508,7 @@ pub fn best_move_timed(
             } else {
                 0
             };
+
             let hashfull = search.tt.hashfull_permill();
             let pv = get_pv_from_tt(search.board.clone(), search.tt, d);
             let pv_str = pv

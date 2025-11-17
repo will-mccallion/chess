@@ -2,7 +2,6 @@
 
 pub mod board;
 pub mod fen;
-pub mod magic_finder;
 pub mod magics;
 pub mod nnue;
 pub mod opening_book;

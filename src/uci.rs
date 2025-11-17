@@ -13,6 +13,7 @@ use std::thread;
 
 const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
 
+#[inline]
 fn extract_i64(cmd: &str, key: &str) -> Option<i64> {
     for tok in cmd.split_whitespace().collect::<Vec<_>>().windows(2) {
         if let Ok(v) = tok[1].parse::<i64>()
@@ -24,6 +25,7 @@ fn extract_i64(cmd: &str, key: &str) -> Option<i64> {
     None
 }
 
+#[inline]
 fn parse_setoption(rest: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = rest.splitn(2, "name").collect();
     let after = parts.get(1)?.trim();
@@ -51,6 +53,8 @@ impl PonderState {
             enabled: false,
         }
     }
+
+    #[inline]
     fn stop_and_join(&mut self) {
         if let Some(sig) = &self.stop_signal {
             sig.store(true, Ordering::Relaxed);
@@ -99,7 +103,7 @@ pub fn run_uci() {
     let mut b = Board::from_fen(START_FEN).expect("valid startpos");
     let mut tc = TimeControl::default();
 
-    let mut tt_size_mb: usize = 128;
+    let mut tt_size_mb: usize = 256;
     let mut tt = SharedTransTable::new(tt_size_mb);
     let mut threads_count: usize = num_cpus::get().max(1);
     let mut ponder = PonderState::new();

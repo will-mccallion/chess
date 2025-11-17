@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-// Large stacks for deep recursion paths in helpers.
 const SEARCH_THREAD_STACK: usize = 32 * 1024 * 1024; // 32 MiB
 
 #[derive(Parser)]
@@ -61,12 +60,9 @@ enum Cmd {
 }
 
 fn main() {
-    const NNUE_PATH: &str = "/home/will/projects/chess/moves/nn-9931db908a9b.nnue";
-
     // Initialize the NNUE network.
-    // Panicking is reasonable here; if the network can't load, the engine can't run.
-    if let Err(e) = nnue::init(NNUE_PATH) {
-        panic!("Failed to load NNUE file at '{}': {}", NNUE_PATH, e);
+    if let Err(e) = nnue::init() {
+        panic!("Failed to load embedded NNUE data: {}", e);
     }
 
     println!("NNUE loaded successfully.");
